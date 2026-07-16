@@ -57,6 +57,7 @@ export default function ScannerPage() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [drag, setDrag] = useState(false);
   const [scanView, setScanView] = useState({ zoom: 1, tx: 0, ty: 0 });
+  const [fullScreenScanner, setFullScreenScanner] = useState(false);
   const scanPanRef = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
 
   const measurements = useMemo(() => (contours ? measure(contours) : null), [contours]);
@@ -152,9 +153,12 @@ export default function ScannerPage() {
     if (!img || !canvas || !wrap) return;
 
     const displayW = wrap.clientWidth;
-    const baseScale = displayW / img.canvas.width;
+    const availableH = wrap.clientHeight;
+    const baseScale = fullScreenScanner && availableH > 120
+      ? Math.min(displayW / img.canvas.width, availableH / img.canvas.height)
+      : displayW / img.canvas.width;
     const scale = baseScale * scanView.zoom;
-    const displayH = Math.round(img.canvas.height * scale);
+    const displayH = fullScreenScanner && availableH > 120 ? availableH : Math.round(img.canvas.height * scale);
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(displayW * dpr);
     canvas.height = Math.round(displayH * dpr);
@@ -197,7 +201,7 @@ export default function ScannerPage() {
         ctx.stroke();
       }
     }
-  }, [contours, calibPts, scanView]);
+  }, [contours, calibPts, scanView, fullScreenScanner]);
 
   const onScanWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
@@ -308,8 +312,23 @@ export default function ScannerPage() {
   );
 
   return (
-    <div className="mx-auto max-w-6xl">
-      <h1 className="mb-6 font-display text-2xl font-bold">{t.scannerTitle}</h1>
+    <div
+      className={
+        fullScreenScanner
+          ? "fixed inset-0 z-[100] overflow-hidden bg-paper p-3 text-ink dark:bg-ink dark:text-paper"
+          : "mx-auto max-w-6xl"
+      }
+    >
+      <div className={fullScreenScanner ? "mb-3 flex items-center justify-between gap-3" : ""}>
+        <h1 className={fullScreenScanner ? "font-display text-xl font-bold" : "mb-6 font-display text-2xl font-bold"}>
+          {t.scannerTitle}
+        </h1>
+        {fullScreenScanner && (
+          <button className="btn-primary" onClick={() => setFullScreenScanner(false)}>
+            Изход от цял екран
+          </button>
+        )}
+      </div>
 
       {!imageRef.current && (
         <div
@@ -383,10 +402,23 @@ export default function ScannerPage() {
       />
 
       {imageRef.current && (
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div
+          className={
+            fullScreenScanner
+              ? "grid h-[calc(100vh-76px)] gap-3 lg:grid-cols-[minmax(0,1fr)_360px]"
+              : "grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]"
+          }
+        >
           {/* Canvas column */}
-          <div className="min-w-0 space-y-4">
-            <div ref={wrapRef} className="panel graticule relative overflow-hidden p-0">
+          <div className={fullScreenScanner ? "flex min-h-0 min-w-0 flex-col gap-3" : "min-w-0 space-y-4"}>
+            <div
+              ref={wrapRef}
+              className={
+                fullScreenScanner
+                  ? "panel graticule relative min-h-0 flex-1 overflow-hidden p-0"
+                  : "panel graticule relative overflow-hidden p-0"
+              }
+            >
               <canvas
                 ref={canvasRef}
                 onClick={onCanvasClick}
@@ -433,6 +465,9 @@ export default function ScannerPage() {
             )}
 
             <div className="flex flex-wrap gap-2">
+              <button className="btn-primary" onClick={() => setFullScreenScanner(true)}>
+                Цял екран
+              </button>
               <button className="btn-ghost" onClick={() => fileInputRef.current?.click()}>
                 {t.newImage}
               </button>
@@ -457,7 +492,7 @@ export default function ScannerPage() {
           </div>
 
           {/* Controls column */}
-          <div className="space-y-4">
+          <div className={fullScreenScanner ? "min-h-0 space-y-3 overflow-y-auto pr-1" : "space-y-4"}>
             {/* Calibration */}
             <section className="panel p-4">
               <h2 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
