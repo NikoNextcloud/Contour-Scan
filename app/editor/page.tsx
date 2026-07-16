@@ -16,15 +16,63 @@ interface View {
   ty: number;
 }
 
-type ToolMode = "select" | "delete" | "scissors" | "circle" | "triangle" | "square" | "polyline";
+type ToolMode =
+  | "select"
+  | "move"
+  | "rotate"
+  | "delete"
+  | "scissors"
+  | "circle"
+  | "triangle"
+  | "square"
+  | "polyline";
 
 type DragState =
   | { kind: "point"; ci: number; pi: number }
+  | { kind: "move-all"; start: Pt; contours: ContourSet }
   | { kind: "pan"; startX: number; startY: number; startTx: number; startTy: number }
   | null;
 
 const clone = (c: ContourSet): ContourSet => JSON.parse(JSON.stringify(c));
 const pointKey = (ci: number, pi: number) => `${ci}:${pi}`;
+
+const mapContourSet = (c: ContourSet, fn: (p: Pt) => Pt): ContourSet => ({
+  outer: c.outer.map(fn),
+  inner: c.inner.map((poly) => poly.map(fn)),
+  polylines: c.polylines?.map((line) => line.map(fn)),
+});
+
+const translateContourSet = (c: ContourSet, dx: number, dy: number): ContourSet =>
+  mapContourSet(c, (p) => ({ x: p.x + dx, y: p.y + dy }));
+
+const rotateContourSet = (c: ContourSet, pivot: Pt, angleDeg: number): ContourSet => {
+  const angle = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return mapContourSet(c, (p) => {
+    const x = p.x - pivot.x;
+    const y = p.y - pivot.y;
+    return {
+      x: pivot.x + x * cos - y * sin,
+      y: pivot.y + x * sin + y * cos,
+    };
+  });
+};
+
+const contourCenter = (c: ContourSet): Pt => {
+  const pts = [c.outer, ...c.inner, ...(c.polylines ?? [])].flat();
+  if (!pts.length) return { x: 0, y: 0 };
+  const box = pts.reduce(
+    (acc, p) => ({
+      minX: Math.min(acc.minX, p.x),
+      minY: Math.min(acc.minY, p.y),
+      maxX: Math.max(acc.maxX, p.x),
+      maxY: Math.max(acc.maxY, p.y),
+    }),
+    { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+  );
+  return { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
+};
 
 export default function EditorPage() {
   const { t, toast, settings } = useApp();
@@ -36,6 +84,13 @@ export default function EditorPage() {
   const [snap, setSnap] = useState(false);
   const [tool, setTool] = useState<ToolMode>("select");
   const [shapeDiameter, setShapeDiameter] = useState(20);
+  const [moveDx, setMoveDx] = useState(0);
+  const [moveDy, setMoveDy] = useState(0);
+  const [pivot, setPivot] = useState<Pt | null>(null);
+  const [usePivotCoordinates, setUsePivotCoordinates] = useState(false);
+  const [rotationType, setRotationType] = useState<"absolute" | "relative">("relative");
+  const [rotationAngle, setRotationAngle] = useState(0);
+  const [appliedAbsoluteAngle, setAppliedAbsoluteAngle] = useState(0);
   const [polyDraft, setPolyDraft] = useState<Pt[]>([]);
   const [selectedPoints, setSelectedPoints] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<ContourSet[]>([]);
@@ -153,6 +208,33 @@ export default function EditorPage() {
     return k ? shapeDiameter / k : shapeDiameter;
   };
 
+  const distanceToPx = (value: number) => {
+    const k = record?.calibration?.mmPerPx;
+    return k ? value / k : value;
+  };
+
+  const applyMove = () => {
+    if (!contours) return;
+    const dx = distanceToPx(moveDx);
+    const dy = distanceToPx(moveDy);
+    if (!dx && !dy) return;
+    pushUndo();
+    setContours((cur) => (cur ? translateContourSet(cur, dx, dy) : cur));
+    setSelectedPoints(new Set());
+  };
+
+  const applyRotation = () => {
+    if (!contours) return;
+    const center = pivot ?? contourCenter(contours);
+    const delta = rotationType === "absolute" ? rotationAngle - appliedAbsoluteAngle : rotationAngle;
+    if (!delta) return;
+    pushUndo();
+    setContours((cur) => (cur ? rotateContourSet(cur, center, delta) : cur));
+    setPivot(center);
+    setAppliedAbsoluteAngle(rotationType === "absolute" ? rotationAngle : appliedAbsoluteAngle + delta);
+    setSelectedPoints(new Set());
+  };
+
   const toggleSelectedPoint = (ci: number, pi: number) => {
     setSelectedPoints((current) => {
       const next = new Set(current);
@@ -242,7 +324,23 @@ export default function EditorPage() {
 
     openLines.forEach((line) => drawOpen(line, "#16a34a"));
     drawOpen(polyDraft, "#e8a33d");
-  }, [record, polys, openLines, polyDraft, selectedPoints, view, grid, gridStep]);
+
+    if (tool === "rotate") {
+      const center = pivot ?? (contours ? contourCenter(contours) : null);
+      if (center) {
+        const r = 9 / view.scale;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
+        ctx.moveTo(center.x - r * 1.6, center.y);
+        ctx.lineTo(center.x + r * 1.6, center.y);
+        ctx.moveTo(center.x, center.y - r * 1.6);
+        ctx.lineTo(center.x, center.y + r * 1.6);
+        ctx.strokeStyle = "#e8a33d";
+        ctx.lineWidth = 2 / view.scale;
+        ctx.stroke();
+      }
+    }
+  }, [record, contours, polys, openLines, polyDraft, selectedPoints, view, grid, gridStep, tool, pivot]);
 
   useEffect(() => {
     redraw();
@@ -344,6 +442,18 @@ export default function EditorPage() {
       cutNearestSegment(p);
       return;
     }
+    if (tool === "move") {
+      if (!contours) return;
+      pushUndo();
+      dragRef.current = { kind: "move-all", start: p, contours: clone(contours) };
+      setSelectedPoints(new Set());
+      return;
+    }
+    if (tool === "rotate") {
+      const nextPivot = snapPt(p);
+      setPivot(nextPivot);
+      return;
+    }
     if (tool === "circle" || tool === "triangle" || tool === "square") {
       addShape(tool, snapPt(p));
       return;
@@ -378,6 +488,9 @@ export default function EditorPage() {
         tx: drag.startTx + (e.clientX - drag.startX),
         ty: drag.startTy + (e.clientY - drag.startY),
       }));
+    } else if (drag.kind === "move-all") {
+      const p = toImage(e);
+      setContours(translateContourSet(drag.contours, p.x - drag.start.x, p.y - drag.start.y));
     } else {
       const p = snapPt(toImage(e));
       const next = polys.map((poly, ci) =>
@@ -481,6 +594,8 @@ export default function EditorPage() {
       <div className="mb-3 grid gap-3 xl:grid-cols-[1fr_340px]">
         <div className="panel flex flex-wrap gap-2 p-3">
           <ToolButton active={tool === "select"} icon="cursor" label="Избор" onClick={() => setTool("select")} />
+          <ToolButton active={tool === "move"} icon="move" label="Премести" onClick={() => setTool("move")} />
+          <ToolButton active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => setTool("rotate")} />
           <ToolButton active={tool === "delete"} icon="trash" label="Изтриване" onClick={() => setTool("delete")} />
           <ToolButton active={tool === "scissors"} icon="scissors" label="Ножица" onClick={() => setTool("scissors")} />
           <ToolButton active={tool === "circle"} icon="circle" label="Кръг" onClick={() => setTool("circle")} />
@@ -502,7 +617,21 @@ export default function EditorPage() {
           unit={shapeUnit}
           selectedCount={selectedCount}
           polyCount={polyDraft.length}
+          moveDx={moveDx}
+          moveDy={moveDy}
+          pivot={pivot ?? contourCenter(contours)}
+          usePivotCoordinates={usePivotCoordinates}
+          rotationType={rotationType}
+          rotationAngle={rotationAngle}
           onDiameter={setShapeDiameter}
+          onMoveDx={setMoveDx}
+          onMoveDy={setMoveDy}
+          onApplyMove={applyMove}
+          onPivot={setPivot}
+          onUsePivotCoordinates={setUsePivotCoordinates}
+          onRotationType={setRotationType}
+          onRotationAngle={setRotationAngle}
+          onApplyRotation={applyRotation}
           onDeleteSelected={deleteSelectedPoints}
           onFinishPolyline={finishPolyline}
           onClearPolyline={() => setPolyDraft([])}
@@ -546,7 +675,21 @@ function ToolOptions({
   unit,
   selectedCount,
   polyCount,
+  moveDx,
+  moveDy,
+  pivot,
+  usePivotCoordinates,
+  rotationType,
+  rotationAngle,
   onDiameter,
+  onMoveDx,
+  onMoveDy,
+  onApplyMove,
+  onPivot,
+  onUsePivotCoordinates,
+  onRotationType,
+  onRotationAngle,
+  onApplyRotation,
   onDeleteSelected,
   onFinishPolyline,
   onClearPolyline,
@@ -556,7 +699,21 @@ function ToolOptions({
   unit: string;
   selectedCount: number;
   polyCount: number;
+  moveDx: number;
+  moveDy: number;
+  pivot: Pt;
+  usePivotCoordinates: boolean;
+  rotationType: "absolute" | "relative";
+  rotationAngle: number;
   onDiameter: (value: number) => void;
+  onMoveDx: (value: number) => void;
+  onMoveDy: (value: number) => void;
+  onApplyMove: () => void;
+  onPivot: (value: Pt) => void;
+  onUsePivotCoordinates: (value: boolean) => void;
+  onRotationType: (value: "absolute" | "relative") => void;
+  onRotationAngle: (value: number) => void;
+  onApplyRotation: () => void;
   onDeleteSelected: () => void;
   onFinishPolyline: () => void;
   onClearPolyline: () => void;
@@ -573,6 +730,110 @@ function ToolOptions({
           <p className="text-sm text-ink/65 dark:text-paper/65">Избрани точки: {selectedCount}</p>
           <button className="btn-ghost w-full" disabled={!selectedCount} onClick={onDeleteSelected}>
             <Icon name="trash" /> Изтрий избраните точки
+          </button>
+        </div>
+      )}
+
+      {tool === "move" && (
+        <div className="space-y-3">
+          <p className="text-sm text-ink/65 dark:text-paper/65">
+            Влачи върху чертежа за свободно местене или въведи точна стойност.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-xs text-ink/60 dark:text-paper/60">
+              X ({unit})
+              <input
+                className="field readout mt-1"
+                type="number"
+                step={0.1}
+                value={moveDx}
+                onChange={(e) => onMoveDx(parseFloat(e.target.value) || 0)}
+              />
+            </label>
+            <label className="block text-xs text-ink/60 dark:text-paper/60">
+              Y ({unit})
+              <input
+                className="field readout mt-1"
+                type="number"
+                step={0.1}
+                value={moveDy}
+                onChange={(e) => onMoveDy(parseFloat(e.target.value) || 0)}
+              />
+            </label>
+          </div>
+          <button className="btn-primary w-full" onClick={onApplyMove}>
+            <Icon name="move" /> Приложи преместване
+          </button>
+        </div>
+      )}
+
+      {tool === "rotate" && (
+        <div className="space-y-3">
+          <p className="text-sm text-ink/65 dark:text-paper/65">
+            Кликни върху чертежа, за да зададеш център на въртене, или въведи координати.
+          </p>
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={usePivotCoordinates}
+              onChange={(e) => onUsePivotCoordinates(e.target.checked)}
+            />
+            Използвай координати
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-xs text-ink/60 dark:text-paper/60">
+              X
+              <input
+                className="field readout mt-1"
+                type="number"
+                step={0.1}
+                disabled={!usePivotCoordinates}
+                value={Number.isFinite(pivot.x) ? Number(pivot.x.toFixed(3)) : 0}
+                onChange={(e) => onPivot({ ...pivot, x: parseFloat(e.target.value) || 0 })}
+              />
+            </label>
+            <label className="block text-xs text-ink/60 dark:text-paper/60">
+              Y
+              <input
+                className="field readout mt-1"
+                type="number"
+                step={0.1}
+                disabled={!usePivotCoordinates}
+                value={Number.isFinite(pivot.y) ? Number(pivot.y.toFixed(3)) : 0}
+                onChange={(e) => onPivot({ ...pivot, y: parseFloat(e.target.value) || 0 })}
+              />
+            </label>
+          </div>
+          <div className="space-y-2 text-sm">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                checked={rotationType === "absolute"}
+                onChange={() => onRotationType("absolute")}
+              />
+              Абсолютно
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                checked={rotationType === "relative"}
+                onChange={() => onRotationType("relative")}
+              />
+              Относително
+            </label>
+          </div>
+          <label className="block text-xs text-ink/60 dark:text-paper/60">
+            Ъгъл
+            <input
+              className="field readout mt-1"
+              type="number"
+              step={0.1}
+              value={rotationAngle}
+              onChange={(e) => onRotationAngle(parseFloat(e.target.value) || 0)}
+            />
+          </label>
+          <button className="btn-primary w-full" onClick={onApplyRotation}>
+            <Icon name="rotate" /> Приложи въртене
           </button>
         </div>
       )}
@@ -655,6 +916,8 @@ function ToolButton({
 
 type IconName =
   | "cursor"
+  | "move"
+  | "rotate"
   | "trash"
   | "scissors"
   | "circle"
@@ -681,6 +944,8 @@ function Icon({ name }: { name: IconName }) {
   return (
     <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" aria-hidden>
       {name === "cursor" && <path {...common} d="M5 3l13 8-6 2-3 6L5 3z" />}
+      {name === "move" && <path {...common} d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3" />}
+      {name === "rotate" && <path {...common} d="M20 11a8 8 0 1 1-2.3-5.6M20 4v7h-7" />}
       {name === "trash" && <path {...common} d="M4 7h16M10 11v6M14 11v6M6 7l1 14h10l1-14M9 7V4h6v3" />}
       {name === "scissors" && <path {...common} d="M4 5l16 14M4 19l6-6M14 9l6-6M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM6 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" />}
       {name === "circle" && <circle {...common} cx="12" cy="12" r="7" />}
