@@ -142,6 +142,106 @@ export function chaikin(pts: Pt[], iterations = 1): Pt[] {
   return cur;
 }
 
+export function smoothContourSet(contours: ContourSet, iterations: number): ContourSet {
+  const safeIterations = Math.max(0, Math.min(5, Math.round(iterations)));
+  if (safeIterations <= 0) return contours;
+  return {
+    outer: chaikin(contours.outer, safeIterations),
+    inner: contours.inner.map((hole) => chaikin(hole, Math.max(0, safeIterations - 1))),
+  };
+}
+
+export function mirrorContourSet(
+  contours: ContourSet,
+  mode: "off" | "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop"
+): ContourSet {
+  if (mode === "off" || contours.outer.length < 6) return contours;
+  const outer = mirrorClosedContour(contours.outer, mode);
+  if (outer.length < 3) return contours;
+  return {
+    outer,
+    inner: mirrorInnerContours(contours.inner, mode),
+  };
+}
+
+function mirrorInnerContours(
+  holes: Pt[][],
+  mode: "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop"
+): Pt[][] {
+  return holes.flatMap((hole) => {
+    if (hole.length < 3) return [];
+    const box = boundingBox(hole);
+    const center = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+    const axis = mirrorAxisForPoints(hole, mode);
+    const mirrored = hole.map((point) => mirrorPoint(point, axis, mode)).reverse();
+    if (mode === "leftToRight" && center.x > axis) return [mirrored];
+    if (mode === "rightToLeft" && center.x < axis) return [mirrored];
+    if (mode === "topToBottom" && center.y > axis) return [mirrored];
+    if (mode === "bottomToTop" && center.y < axis) return [mirrored];
+    return [hole, mirrored];
+  });
+}
+
+function mirrorClosedContour(
+  points: Pt[],
+  mode: "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop"
+): Pt[] {
+  const axis = mirrorAxisForPoints(points, mode);
+  const source = points.filter((point) => isSourceSide(point, axis, mode));
+  if (source.length < 3 || source.length < points.length * 0.18) return points;
+
+  const sorted = [...source].sort((a, b) => {
+    if (mode === "leftToRight" || mode === "rightToLeft") return a.y - b.y || a.x - b.x;
+    return a.x - b.x || a.y - b.y;
+  });
+  const mirrored = sorted.map((point) => mirrorPoint(point, axis, mode)).reverse();
+  return dedupePoints(sorted.concat(mirrored), 0.75);
+}
+
+function mirrorAxisForPoints(
+  points: Pt[],
+  mode: "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop"
+): number {
+  const box = boundingBox(points);
+  return mode === "leftToRight" || mode === "rightToLeft" ? box.x + box.w / 2 : box.y + box.h / 2;
+}
+
+function isSourceSide(
+  point: Pt,
+  axis: number,
+  mode: "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop"
+): boolean {
+  if (mode === "leftToRight") return point.x <= axis;
+  if (mode === "rightToLeft") return point.x >= axis;
+  if (mode === "topToBottom") return point.y <= axis;
+  return point.y >= axis;
+}
+
+function mirrorPoint(
+  point: Pt,
+  axis: number,
+  mode: "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop"
+): Pt {
+  if (mode === "leftToRight" || mode === "rightToLeft") {
+    return { x: axis * 2 - point.x, y: point.y };
+  }
+  return { x: point.x, y: axis * 2 - point.y };
+}
+
+function dedupePoints(points: Pt[], minDistance: number): Pt[] {
+  const out: Pt[] = [];
+  for (const point of points) {
+    const prev = out[out.length - 1];
+    if (!prev || Math.hypot(point.x - prev.x, point.y - prev.y) >= minDistance) {
+      out.push(point);
+    }
+  }
+  const first = out[0];
+  const last = out[out.length - 1];
+  if (first && last && Math.hypot(first.x - last.x, first.y - last.y) < minDistance) out.pop();
+  return out;
+}
+
 /** Ramer–Douglas–Peucker simplification for a closed polygon. */
 export function simplify(pts: Pt[], epsilon: number): Pt[] {
   if (pts.length < 4 || epsilon <= 0) return pts;

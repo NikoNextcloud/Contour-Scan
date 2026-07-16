@@ -6,7 +6,7 @@ import { useApp } from "@/lib/store";
 import { loadOpenCV } from "@/lib/opencv";
 import { detectContours, detectContoursFallback, fileToImageData } from "@/lib/pipeline";
 import { calibrationFromImageFile } from "@/lib/image-metadata";
-import { measure } from "@/lib/geometry";
+import { measure, mirrorContourSet, smoothContourSet } from "@/lib/geometry";
 import { scanDB, newId } from "@/lib/db";
 import { setCurrent } from "@/lib/current";
 import MeasurementsPanel from "@/components/MeasurementsPanel";
@@ -64,7 +64,9 @@ export default function ScannerPage() {
         setPhase("processing");
         // Yield a frame so the spinner paints before the heavy sync work.
         await new Promise((r) => requestAnimationFrame(r));
-        const result = cv ? detectContours(cv, img.data, p) : detectContoursFallback(img.data, p);
+        const raw = cv ? detectContours(cv, img.data, p) : detectContoursFallback(img.data, p);
+        const mirrored = mirrorContourSet(raw, p.mirrorMode);
+        const result = smoothContourSet(mirrored, p.smoothIterations);
         setContours(result);
         setPhase("ready");
       } catch (e: any) {
@@ -483,6 +485,14 @@ export default function ScannerPage() {
                   onChange={(v) => updateParams({ epsilonPct: v })}
                 />
                 <Slider
+                  label="Плавност на скана"
+                  min={0}
+                  max={4}
+                  step={1}
+                  value={params.smoothIterations}
+                  onChange={(v) => updateParams({ smoothIterations: v })}
+                />
+                <Slider
                   label={t.paramMinHole}
                   min={0.1}
                   max={10}
@@ -505,6 +515,27 @@ export default function ScannerPage() {
                     <option value="yes">{t.invertYes}</option>
                     <option value="no">{t.invertNo}</option>
                   </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-ink/60 dark:text-paper/60">
+                    Mirror от едната страна
+                  </label>
+                  <select
+                    className="field"
+                    value={params.mirrorMode}
+                    onChange={(e) =>
+                      updateParams({ mirrorMode: e.target.value as PipelineParams["mirrorMode"] })
+                    }
+                  >
+                    <option value="off">Изключено</option>
+                    <option value="leftToRight">Лява страна → дясна mirror</option>
+                    <option value="rightToLeft">Дясна страна → лява mirror</option>
+                    <option value="topToBottom">Горна страна → долна mirror</option>
+                    <option value="bottomToTop">Долна страна → горна mirror</option>
+                  </select>
+                  <p className="mt-1 text-xs text-ink/50 dark:text-paper/50">
+                    Ползвай това за симетрични детайли, когато едната страна е по-чиста от другата.
+                  </p>
                 </div>
               </div>
             </section>

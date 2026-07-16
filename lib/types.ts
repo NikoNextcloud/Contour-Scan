@@ -26,15 +26,21 @@ export interface PipelineParams {
   minHolePct: number;
   /** Force invert of the binary image ("auto" decides from image borders). */
   invert: "auto" | "yes" | "no";
+  /** Build a symmetric contour from one scanned side. */
+  mirrorMode: "off" | "leftToRight" | "rightToLeft" | "topToBottom" | "bottomToTop";
+  /** Smooth detected contour after scanning, before measurements/export. */
+  smoothIterations: number;
 }
 
 export const DEFAULT_PARAMS: PipelineParams = {
   blur: 5,
   threshold: "otsu",
   morph: 3,
-  epsilonPct: 0.3,
+  epsilonPct: 0.18,
   minHolePct: 0.5,
   invert: "auto",
+  mirrorMode: "off",
+  smoothIterations: 1,
 };
 
 /** Geometric measurements of a contour, in pixels. */
