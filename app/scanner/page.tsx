@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useApp } from "@/lib/store";
 import { loadOpenCV } from "@/lib/opencv";
-import { detectContours, fileToImageData } from "@/lib/pipeline";
+import { detectContours, detectContoursFallback, fileToImageData } from "@/lib/pipeline";
 import { measure } from "@/lib/geometry";
 import { scanDB, newId } from "@/lib/db";
 import { setCurrent } from "@/lib/current";
@@ -59,11 +59,11 @@ export default function ScannerPage() {
       setError(null);
       try {
         setPhase("loadingCV");
-        const cv = await loadOpenCV();
+        const cv = await loadOpenCV({ timeoutMs: 4500 }).catch(() => null);
         setPhase("processing");
         // Yield a frame so the spinner paints before the heavy sync work.
         await new Promise((r) => requestAnimationFrame(r));
-        const result = detectContours(cv, img.data, p);
+        const result = cv ? detectContours(cv, img.data, p) : detectContoursFallback(img.data, p);
         setContours(result);
         setPhase("ready");
       } catch (e: any) {
@@ -89,8 +89,8 @@ export default function ScannerPage() {
         setCalibPts([]);
         setCalibMode(false);
         await runDetection(params);
-      } catch {
-        setError(t.error);
+      } catch (e: any) {
+        setError(String(e?.message ?? t.error));
       }
     },
     [params, runDetection, t.error]
@@ -309,7 +309,7 @@ export default function ScannerPage() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp"
+        accept="image/jpeg,image/png,image/webp,image/bmp,.bmp"
         className="hidden"
         onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
       />

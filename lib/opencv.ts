@@ -1,17 +1,18 @@
 /**
- * Lazy loader for OpenCV.js (WebAssembly build, ~9 MB).
- * The library is fetched once from the official OpenCV CDN and cached by the browser.
- * Handles both legacy builds (cv.onRuntimeInitialized) and newer builds where `cv` is a Promise.
+ * Optional lazy loader for OpenCV.js.
+ * The scanner has a built-in TypeScript fallback, so a failed CDN request must
+ * never block uploads or BMP processing on Vercel.
  */
 
 const OPENCV_URL = "https://docs.opencv.org/4.10.0/opencv.js";
 
 let loader: Promise<any> | null = null;
 
-export function loadOpenCV(): Promise<any> {
+export function loadOpenCV(options: { timeoutMs?: number } = {}): Promise<any> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("OpenCV.js is browser-only"));
   }
+
   const existing = (window as any).cv;
   if (existing && existing.Mat) return Promise.resolve(existing);
 
@@ -23,7 +24,6 @@ export function loadOpenCV(): Promise<any> {
       script.onload = async () => {
         try {
           let cv = (window as any).cv;
-          // Newer WASM builds expose `cv` as a thenable that resolves to the module.
           if (cv && typeof cv.then === "function") {
             cv = await cv;
             (window as any).cv = cv;
@@ -33,17 +33,25 @@ export function loadOpenCV(): Promise<any> {
             cv.onRuntimeInitialized = () => resolve((window as any).cv);
             return;
           }
-          reject(new Error("OpenCV loaded but `cv` is undefined"));
-        } catch (e) {
-          reject(e);
+          reject(new Error("OpenCV loaded but cv is undefined"));
+        } catch (error) {
+          reject(error);
         }
       };
       script.onerror = () => {
         loader = null;
-        reject(new Error("Failed to load OpenCV.js — check your connection"));
+        reject(new Error("OpenCV.js could not be loaded"));
       };
       document.head.appendChild(script);
     });
   }
-  return loader;
+
+  if (!options.timeoutMs) return loader;
+
+  return Promise.race([
+    loader,
+    new Promise((_, reject) => {
+      window.setTimeout(() => reject(new Error("OpenCV.js load timed out")), options.timeoutMs);
+    }),
+  ]);
 }

@@ -12,7 +12,7 @@ export interface ContourSet {
   inner: Pt[][];
 }
 
-/** Parameters that control the OpenCV pipeline. */
+/** Parameters that control the contour pipeline. */
 export interface PipelineParams {
   /** Gaussian blur kernel size (odd, 1 = off). */
   blur: number;

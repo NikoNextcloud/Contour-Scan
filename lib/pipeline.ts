@@ -1,6 +1,8 @@
 import type { ContourSet, PipelineParams, Pt } from "./types";
 
-/** Longest image side we feed into OpenCV; larger inputs are downscaled for speed. */
+type ByteArray = Uint8Array<ArrayBufferLike>;
+
+/** Longest image side we process; larger inputs are downscaled for speed. */
 export const MAX_PROCESS_SIDE = 2400;
 
 /**
@@ -10,7 +12,7 @@ export const MAX_PROCESS_SIDE = 2400;
 export async function fileToImageData(
   file: Blob
 ): Promise<{ imageData: ImageData; originalW: number; originalH: number; scale: number }> {
-  const bitmap = await createImageBitmap(file);
+  const bitmap = await blobToBitmap(file);
   const originalW = bitmap.width;
   const originalH = bitmap.height;
   const scale = Math.min(1, MAX_PROCESS_SIDE / Math.max(originalW, originalH));
@@ -23,6 +25,23 @@ export async function fileToImageData(
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
   return { imageData: ctx.getImageData(0, 0, w, h), originalW, originalH, scale };
+}
+
+async function blobToBitmap(file: Blob): Promise<ImageBitmap> {
+  try {
+    return await createImageBitmap(file);
+  } catch {
+    const url = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = url;
+      await image.decode();
+      return await createImageBitmap(image);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
 }
 
 /**
@@ -153,4 +172,342 @@ function borderIsMostlyWhite(bin: any): boolean {
     total += 2;
   }
   return white / total > 0.5;
+}
+
+/**
+ * Built-in fallback detector used when OpenCV.js cannot be loaded.
+ * It is intentionally dependency-free so Vercel deployments keep working even
+ * when the OpenCV CDN is blocked, slow, or offline.
+ */
+export function detectContoursFallback(imageData: ImageData, params: PipelineParams): ContourSet {
+  const { width, height, data } = imageData;
+  const gray: ByteArray = new Uint8Array(width * height);
+
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    gray[p] = Math.round(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+  }
+
+  const blurred = params.blur > 1 ? boxBlurGray(gray, width, height, Math.min(3, params.blur >> 1)) : gray;
+  const threshold =
+    params.threshold === "adaptive"
+      ? adaptiveThreshold(blurred, width, height)
+      : otsuThreshold(blurred);
+  let mask: ByteArray = new Uint8Array(width * height);
+  for (let i = 0; i < blurred.length; i++) {
+    mask[i] = blurred[i] > threshold ? 1 : 0;
+  }
+
+  const invert =
+    params.invert === "yes" || (params.invert === "auto" && borderMaskIsMostlyObject(mask, width, height));
+  if (invert) {
+    for (let i = 0; i < mask.length; i++) mask[i] = mask[i] ? 0 : 1;
+  }
+
+  const passes = Math.max(0, Math.min(4, Math.round(params.morph)));
+  if (passes > 0) {
+    mask = closeMask(openMask(mask, width, height, passes), width, height, passes);
+  }
+
+  const components = connectedComponents(mask, width, height, 1, true);
+  const minArea = Math.max(25, width * height * 0.001);
+  const outerComponent = components.filter((item) => item.area >= minArea).sort((a, b) => b.area - a.area)[0];
+  if (!outerComponent) {
+    throw new Error("NO_CONTOUR");
+  }
+
+  const objectMask: ByteArray = new Uint8Array(width * height);
+  for (const index of outerComponent.indices) objectMask[index] = 1;
+  const outerBoundary = boundaryPoints(objectMask, width, height, 1);
+  const outer = simplifyClosedPolygon(orderBoundaryByAngle(outerBoundary), params.epsilonPct);
+
+  const holes: Pt[][] = [];
+  const backgroundInside: ByteArray = new Uint8Array(width * height);
+  for (let i = 0; i < objectMask.length; i++) backgroundInside[i] = objectMask[i] ? 0 : 1;
+  const bgComponents = connectedComponents(backgroundInside, width, height, 1, false);
+  const minHoleArea = (params.minHolePct / 100) * outerComponent.area;
+  for (const component of bgComponents) {
+    if (component.touchesBorder || component.area < minHoleArea) continue;
+    const holeMask: ByteArray = new Uint8Array(width * height);
+    for (const index of component.indices) holeMask[index] = 1;
+    const holeBoundary = boundaryPoints(holeMask, width, height, 1);
+    const hole = simplifyClosedPolygon(orderBoundaryByAngle(holeBoundary), params.epsilonPct);
+    if (hole.length >= 3 && pointInPolygon(hole[0], outer)) holes.push(hole);
+  }
+
+  return { outer, inner: holes };
+}
+
+function otsuThreshold(gray: ByteArray): number {
+  const hist = new Array<number>(256).fill(0);
+  for (const value of gray) hist[value]++;
+
+  const total = gray.length;
+  let sum = 0;
+  for (let i = 0; i < 256; i++) sum += i * hist[i];
+
+  let sumB = 0;
+  let wB = 0;
+  let maxVariance = -1;
+  let threshold = 127;
+
+  for (let i = 0; i < 256; i++) {
+    wB += hist[i];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += i * hist[i];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const variance = wB * wF * (mB - mF) ** 2;
+    if (variance > maxVariance) {
+      maxVariance = variance;
+      threshold = i;
+    }
+  }
+
+  return threshold;
+}
+
+function adaptiveThreshold(gray: ByteArray, width: number, height: number): number {
+  const samples: number[] = [];
+  const step = Math.max(1, Math.floor(Math.min(width, height) / 80));
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      samples.push(gray[y * width + x]);
+    }
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length * 0.48)] ?? 127;
+}
+
+function boxBlurGray(gray: ByteArray, width: number, height: number, radius: number): ByteArray {
+  if (radius <= 0) return gray;
+  const out = new Uint8Array(gray.length);
+  const size = radius * 2 + 1;
+  const area = size * size;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const yy = clamp(y + dy, 0, height - 1);
+        for (let dx = -radius; dx <= radius; dx++) {
+          sum += gray[yy * width + clamp(x + dx, 0, width - 1)];
+        }
+      }
+      out[y * width + x] = Math.round(sum / area);
+    }
+  }
+  return out;
+}
+
+function openMask(mask: ByteArray, width: number, height: number, passes: number): ByteArray {
+  let next = mask;
+  for (let i = 0; i < passes; i++) next = erode(next, width, height);
+  for (let i = 0; i < passes; i++) next = dilate(next, width, height);
+  return next;
+}
+
+function closeMask(mask: ByteArray, width: number, height: number, passes: number): ByteArray {
+  let next = mask;
+  for (let i = 0; i < passes; i++) next = dilate(next, width, height);
+  for (let i = 0; i < passes; i++) next = erode(next, width, height);
+  return next;
+}
+
+function erode(mask: ByteArray, width: number, height: number): ByteArray {
+  const out = new Uint8Array(mask.length);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      out[i] =
+        mask[i] &&
+        mask[i - 1] &&
+        mask[i + 1] &&
+        mask[i - width] &&
+        mask[i + width] &&
+        mask[i - width - 1] &&
+        mask[i - width + 1] &&
+        mask[i + width - 1] &&
+        mask[i + width + 1]
+          ? 1
+          : 0;
+    }
+  }
+  return out;
+}
+
+function dilate(mask: ByteArray, width: number, height: number): ByteArray {
+  const out = new Uint8Array(mask.length);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      out[i] =
+        mask[i] ||
+        mask[i - 1] ||
+        mask[i + 1] ||
+        mask[i - width] ||
+        mask[i + width] ||
+        mask[i - width - 1] ||
+        mask[i - width + 1] ||
+        mask[i + width - 1] ||
+        mask[i + width + 1]
+          ? 1
+          : 0;
+    }
+  }
+  return out;
+}
+
+type Component = {
+  area: number;
+  indices: number[];
+  touchesBorder: boolean;
+};
+
+function connectedComponents(
+  mask: ByteArray,
+  width: number,
+  height: number,
+  target: 0 | 1,
+  ignoreBorderComponents: boolean
+): Component[] {
+  const visited: ByteArray = new Uint8Array(mask.length);
+  const components: Component[] = [];
+  const queue = new Int32Array(mask.length);
+
+  for (let start = 0; start < mask.length; start++) {
+    if (visited[start] || mask[start] !== target) continue;
+    let head = 0;
+    let tail = 0;
+    let touchesBorder = false;
+    const indices: number[] = [];
+    visited[start] = 1;
+    queue[tail++] = start;
+
+    while (head < tail) {
+      const index = queue[head++];
+      indices.push(index);
+      const x = index % width;
+      const y = Math.floor(index / width);
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) touchesBorder = true;
+
+      const neighbors = [index - 1, index + 1, index - width, index + width];
+      for (const next of neighbors) {
+        if (next < 0 || next >= mask.length || visited[next] || mask[next] !== target) continue;
+        const nx = next % width;
+        if (Math.abs(nx - x) > 1) continue;
+        visited[next] = 1;
+        queue[tail++] = next;
+      }
+    }
+
+    if (!(ignoreBorderComponents && touchesBorder)) {
+      components.push({ area: indices.length, indices, touchesBorder });
+    }
+  }
+
+  return components;
+}
+
+function boundaryPoints(mask: ByteArray, width: number, height: number, value: 0 | 1): Pt[] {
+  const points: Pt[] = [];
+  const stride = Math.max(1, Math.floor(Math.max(width, height) / 900));
+  for (let y = 1; y < height - 1; y += stride) {
+    for (let x = 1; x < width - 1; x += stride) {
+      const i = y * width + x;
+      if (mask[i] !== value) continue;
+      if (
+        mask[i - 1] !== value ||
+        mask[i + 1] !== value ||
+        mask[i - width] !== value ||
+        mask[i + width] !== value
+      ) {
+        points.push({ x, y });
+      }
+    }
+  }
+  return points;
+}
+
+function orderBoundaryByAngle(points: Pt[]): Pt[] {
+  if (points.length <= 2) return points;
+  const cx = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+  const cy = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+  return [...points].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+}
+
+function simplifyClosedPolygon(points: Pt[], epsilonPct: number): Pt[] {
+  if (points.length <= 12) return points;
+  const epsilon = Math.max(1, (epsilonPct / 100) * polygonPerimeter(points));
+  const simplified = rdp(points, epsilon);
+  return simplified.length >= 3 ? simplified : points.slice(0, 3);
+}
+
+function rdp(points: Pt[], epsilon: number): Pt[] {
+  if (points.length < 3) return points;
+  let maxDist = 0;
+  let index = 0;
+  const end = points.length - 1;
+  for (let i = 1; i < end; i++) {
+    const dist = perpendicularDistance(points[i], points[0], points[end]);
+    if (dist > maxDist) {
+      index = i;
+      maxDist = dist;
+    }
+  }
+  if (maxDist > epsilon) {
+    const left = rdp(points.slice(0, index + 1), epsilon);
+    const right = rdp(points.slice(index), epsilon);
+    return left.slice(0, -1).concat(right);
+  }
+  return [points[0], points[end]];
+}
+
+function perpendicularDistance(point: Pt, lineStart: Pt, lineEnd: Pt): number {
+  const dx = lineEnd.x - lineStart.x;
+  const dy = lineEnd.y - lineStart.y;
+  if (dx === 0 && dy === 0) return Math.hypot(point.x - lineStart.x, point.y - lineStart.y);
+  return Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x) / Math.hypot(dx, dy);
+}
+
+function polygonPerimeter(points: Pt[]): number {
+  let total = 0;
+  for (let i = 0; i < points.length; i++) {
+    const next = points[(i + 1) % points.length];
+    total += Math.hypot(next.x - points[i].x, next.y - points[i].y);
+  }
+  return total;
+}
+
+function pointInPolygon(point: Pt, polygon: Pt[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersects = yi > point.y !== yj > point.y && point.x < ((xj - xi) * (point.y - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function borderMaskIsMostlyObject(mask: ByteArray, width: number, height: number): boolean {
+  let count = 0;
+  let total = 0;
+  const stepX = Math.max(1, Math.floor(width / 100));
+  for (let x = 0; x < width; x += stepX) {
+    count += mask[x] + mask[(height - 1) * width + x];
+    total += 2;
+  }
+  const stepY = Math.max(1, Math.floor(height / 100));
+  for (let y = 0; y < height; y += stepY) {
+    count += mask[y * width] + mask[y * width + width - 1];
+    total += 2;
+  }
+  return count / total > 0.5;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
