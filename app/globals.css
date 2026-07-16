@@ -1,0 +1,96 @@
+@import "tailwindcss";
+
+/* Class-based dark mode: <html class="dark"> */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Palette — machinist's bench: graphite, paper, Dykem layout blue, caliper amber */
+  --color-ink: #10151b; /* deep graphite */
+  --color-ink-2: #1a2129; /* raised graphite panel */
+  --color-ink-3: #242d38; /* borders on dark */
+  --color-paper: #f2f4f6; /* light background */
+  --color-paper-2: #ffffff; /* raised light panel */
+  --color-paper-3: #dde3e9; /* borders on light */
+  --color-dye: #1450a8; /* Dykem layout blue — primary */
+  --color-dye-bright: #4c8dff; /* primary on dark */
+  --color-amber: #e8a33d; /* caliper amber — measurement highlights */
+  --color-contour-outer: #2563eb;
+  --color-contour-inner: #dc2626;
+
+  --font-display: var(--font-space-grotesk), sans-serif;
+  --font-sans: var(--font-plex-sans), sans-serif;
+  --font-mono: var(--font-plex-mono), monospace;
+
+  --animate-toast: toast-in 0.25s ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-paper text-ink antialiased dark:bg-ink dark:text-paper;
+  font-family: var(--font-sans);
+}
+
+/* Reusable primitives ---------------------------------------------------- */
+/* Defined with @utility so they compose and can be @apply-ed in v4. */
+
+@utility panel {
+  @apply rounded-xl border border-paper-3 bg-paper-2 dark:border-ink-3 dark:bg-ink-2;
+}
+
+@utility btn {
+  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-dye disabled:cursor-not-allowed disabled:opacity-40;
+}
+
+@utility btn-primary {
+  @apply btn bg-dye text-white hover:bg-dye/90 dark:bg-dye-bright dark:text-ink dark:hover:bg-dye-bright/90;
+}
+
+@utility btn-ghost {
+  @apply btn border border-paper-3 bg-transparent hover:bg-ink/5 dark:border-ink-3 dark:hover:bg-paper/5;
+}
+
+@utility field {
+  @apply w-full rounded-lg border border-paper-3 bg-paper-2 px-3 py-2 text-sm outline-none focus:border-dye dark:border-ink-3 dark:bg-ink-2 dark:focus:border-dye-bright;
+}
+
+/* Caliper-style readout: the app's signature element */
+.readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Graticule background for canvas work areas */
+.graticule {
+  background-image:
+    linear-gradient(to right, currentColor 1px, transparent 1px),
+    linear-gradient(to bottom, currentColor 1px, transparent 1px);
+  background-size: 24px 24px;
+  color: rgb(0 0 0 / 0.05);
+}
+.dark .graticule {
+  color: rgb(255 255 255 / 0.05);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
