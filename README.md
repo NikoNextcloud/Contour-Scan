@@ -1,99 +1,167 @@
 # ContourScan AI
 
-**От снимка до DXF за секунди.** Извличане на външния контур на обект от снимка и експорт към DXF / SVG / PNG за CNC, лазерно рязане, винил и CAD — изцяло в браузъра, без сървър.
+ContourScan AI is a full-stack web application for extracting production-ready object contours from photos and exporting them for CNC, laser cutting, vinyl cutting, printing, CAD, and manufacturing.
 
-_From photo to DXF in seconds. Extract an object's outer contour from a photo and export to DXF / SVG / PNG for CNC, laser, vinyl and CAD — entirely in the browser, no server._
+The repository is prepared for:
 
----
+- Frontend deployment on Vercel
+- Backend deployment on Render, Railway, or Docker
+- GitHub Actions for build, lint, and tests
+- Future AI model integration with OpenCV, ONNX Runtime, TensorFlow, PyTorch, OpenVINO, Cloudflare AI, Supabase, or vector databases
 
-## 🇧🇬 Български
+## Project Structure
 
-### Какво прави
+```text
+ContourScan-AI/
+  apps/
+    web/      Next.js 15, React 19, TypeScript, TailwindCSS, Framer Motion, React Konva
+    api/      FastAPI, OpenCV, NumPy, Pillow, ezdxf, svgwrite
+  .github/    CI workflow
+  vercel.json
+  render.yaml
+  docker-compose.yml
+```
 
-1. **Сканиране** — качваш снимка (или снимаш с камерата) на обект върху контрастен фон.
-2. **Детекция** — OpenCV.js (WebAssembly) намира външния контур и вътрешните дупки, филтрира шум и прах.
-3. **Калибрация** — кликваш две точки върху предмет с известен размер (кредитна карта, монета, лист A4) и въвеждаш реалната дължина → всички размери стават в милиметри.
-4. **Редакция** — влачиш точки, добавяш/триеш възли, изглаждаш или опростяваш контура.
-5. **Експорт** — DXF (R12, слоеве OUTER/INNER), SVG (в мм), PNG, JSON или CSV.
+## Features Included
 
-Снимките **не напускат устройството ти** — цялата обработка е локална. Историята се пази в браузъра (IndexedDB).
+- Modern SaaS dashboard
+- Drag and drop image upload UI
+- Camera-ready scanner workflow
+- Calibration-ready measurement panel
+- Interactive contour editor with draggable points
+- Outer contour, inner contour, and hole color coding
+- CAD tooling panels for DXF comparison, cut paths, lead-in, lead-out, offsets, tabs, and bridges
+- Smart contour learning dashboard
+- Object library categories
+- Export targets: DXF, SVG, PNG, PDF, JSON, CSV, and G-Code
+- FastAPI endpoints for scanning, contour detection, measurement, history, and export
+- OpenCV contour pipeline with fallback behavior
+- Unit tests for geometry calculations
 
-### Локално стартиране
+## Local Development
+
+### Frontend
 
 ```bash
+cd ContourScan-AI
 npm install
-npm run dev      # http://localhost:3000
+npm run dev
 ```
 
-Други команди:
+Open `http://localhost:3000`.
+
+### Backend
 
 ```bash
-npm run build    # продукционен build
-npm run start    # стартиране на build-а
-npm run lint     # проверка с ESLint
+cd ContourScan-AI/apps/api
+python -m venv .venv
+.venv/Scripts/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
 ```
 
-Изисква **Node.js 18+** (препоръчано 20/22).
+Open `http://localhost:8000/docs`.
 
-### Публикуване във Vercel
+## Environment Variables
 
-1. Качи проекта в GitHub репо.
-2. В [vercel.com](https://vercel.com) → **Add New → Project** → избери репото.
-3. Framework preset: **Next.js** (разпознава се автоматично). Няма нужда от environment променливи.
-4. **Deploy**. Готово — приложението е статично и се хоства на Vercel Hobby безплатно.
+Copy `.env.example` to `.env.local` for local work.
 
-> OpenCV.js (~9 MB) се зарежда еднократно от официалния CDN на OpenCV при първото сканиране и се кешира от браузъра.
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_APP_NAME=ContourScan AI
+CONTOURSCAN_STORAGE=local
+CONTOURSCAN_MAX_UPLOAD_MB=100
+```
 
----
+On Vercel, set `NEXT_PUBLIC_API_URL` to the deployed Render or Railway backend URL.
 
-## 🇬🇧 English
+## Deploy Frontend to Vercel
 
-### What it does
+1. Push this folder to a GitHub repository.
+2. Open Vercel and import the repository.
+3. Set the project root to `apps/web` if Vercel asks for it.
+4. Add `NEXT_PUBLIC_API_URL` in Environment Variables.
+5. Deploy.
 
-1. **Scan** — upload a photo (or use the camera) of an object on a contrasting background.
-2. **Detect** — OpenCV.js (WebAssembly) finds the outer contour and inner holes, filtering noise.
-3. **Calibrate** — click two points on an item of known size (credit card, coin, A4 sheet) and enter the real length → all dimensions become millimetres.
-4. **Edit** — drag points, add/remove nodes, smooth or simplify the contour.
-5. **Export** — DXF (R12, OUTER/INNER layers), SVG (in mm), PNG, JSON or CSV.
+The root `vercel.json` is included for monorepo deployment.
 
-Photos **never leave your device** — all processing is local. History is stored in the browser (IndexedDB).
+## Deploy Backend to Render
 
-### Run locally
+1. Push the repository to GitHub.
+2. In Render, create a new Web Service.
+3. Select the same repository.
+4. Use `apps/api` as the root directory.
+5. Build command:
 
 ```bash
-npm install
-npm run dev      # http://localhost:3000
+pip install -r requirements.txt
 ```
 
-Requires **Node.js 18+** (20/22 recommended).
+6. Start command:
 
-### Deploy to Vercel
-
-Push to GitHub, import the repo at [vercel.com](https://vercel.com), keep the auto-detected **Next.js** preset, and click **Deploy**. No environment variables required — the app is fully static.
-
----
-
-## Tech stack
-
-| Layer          | Choice                                                        |
-| -------------- | ------------------------------------------------------------ |
-| Framework      | Next.js 15 (App Router) + React 19                           |
-| Language       | TypeScript (strict)                                          |
-| Styling        | Tailwind CSS v4 (design tokens, dark/light)                  |
-| Vision         | OpenCV.js (WASM): grayscale → threshold → morphology → findContours |
-| Geometry       | Pure TS: shoelace area, rotating-calipers min-rect, RDP, Chaikin |
-| Storage        | IndexedDB (history) + localStorage (settings)               |
-| Export         | Hand-written DXF R12 & SVG (physical mm) writers             |
-
-## Contour pipeline
-
-```
-grayscale → Gaussian blur → threshold (Otsu | adaptive)
-          → auto-invert (from border pixels) → morphology (open + close)
-          → findContours (RETR_CCOMP) → largest top-level contour = OUTER
-          → children above size threshold = INNER holes → approxPolyDP
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-## License
+The included `render.yaml` can also be used as a blueprint.
 
-MIT — see [LICENSE](./LICENSE).
+## Docker
+
+```bash
+cd ContourScan-AI
+docker compose up --build
+```
+
+Frontend: `http://localhost:3000`  
+Backend: `http://localhost:8000`
+
+## API
+
+- `GET /health`
+- `POST /scan`
+- `POST /remove-background`
+- `POST /detect-contour`
+- `POST /measure`
+- `POST /export/dxf`
+- `POST /export/svg`
+- `POST /export/csv`
+- `POST /export/json`
+- `GET /history`
+- `DELETE /history/{id}`
+
+## Future AI Architecture
+
+The API is organized so model providers can be swapped without changing the frontend. Add model adapters under `apps/api/app/services/` for:
+
+- ONNX Runtime
+- TensorFlow
+- PyTorch
+- OpenVINO
+- OpenCV DNN
+- Cloudflare Workers AI
+- Vectorize or Supabase vector search
+
+## Dataset Export Roadmap
+
+The data model is prepared for future export to:
+
+- JSON
+- COCO
+- YOLO Segmentation
+- Pascal VOC
+- CSV
+- Polygon coordinates
+- Binary masks
+- DXF
+- SVG
+
+## GitHub Checklist
+
+```bash
+git init
+git add .
+git commit -m "Initial ContourScan AI project"
+git branch -M main
+git remote add origin https://github.com/YOUR_USER/contourscan-ai.git
+git push -u origin main
+```

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: contourscan-ai-api
+    env: python
+    rootDir: apps/api
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CONTOURSCAN_STORAGE
+        value: local
+      - key: CONTOURSCAN_MAX_UPLOAD_MB
+        value: 100
