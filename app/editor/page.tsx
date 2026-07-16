@@ -14,6 +14,8 @@ import {
   minAreaRect,
   nearestSegment,
   offsetPolygon,
+  pointToSegment,
+  polygonArea,
   resampleClosed,
   scaleAround,
   simplify,
@@ -438,27 +440,62 @@ export default function EditorPage() {
     setSelectedPoints(new Set());
   };
 
-  const cutNearestSegment = (p: Pt) => {
-    let best = { ci: -1, index: 0, dist: Infinity };
+  /** Ножица: клик върху линия я изтрива директно (без зелени отворени фигури). */
+  const deleteNearestLine = (p: Pt) => {
+    const tol = 18 / view.scale;
+    let best: { type: "poly" | "line"; idx: number; dist: number } = {
+      type: "poly",
+      idx: -1,
+      dist: Infinity,
+    };
+    // Затворени контури (външен + дупки)
     polys.forEach((poly, ci) => {
       const seg = nearestSegment(poly, p);
-      if (seg.dist < best.dist) best = { ci, ...seg };
+      if (seg.dist < best.dist) best = { type: "poly", idx: ci, dist: seg.dist };
     });
-    if (best.ci === -1 || best.dist > 18 / view.scale) return;
-    pushUndo();
-    const source = polys[best.ci];
-    const open = source.slice(best.index + 1).concat(source.slice(0, best.index + 1));
-    if (best.ci === 0) {
-      setContours((cur) => cur && { ...cur, polylines: [...(cur.polylines ?? []), open] });
-    } else {
-      const next = polys.filter((_, ci) => ci !== best.ci);
-      setContours((cur) => ({
-        outer: next[0],
-        inner: next.slice(1),
-        polylines: [...(cur?.polylines ?? []), open],
-      }));
+    // Отворени полилинии (сегменти без затваряне)
+    openLines.forEach((line, li) => {
+      for (let i = 0; i < line.length - 1; i++) {
+        const d = pointToSegment(p, line[i], line[i + 1]);
+        if (d < best.dist) best = { type: "line", idx: li, dist: d };
+      }
+    });
+    if (best.idx === -1 || best.dist > tol) return;
+
+    if (best.type === "line") {
+      pushUndo();
+      setContours(
+        (cur) =>
+          cur && { ...cur, polylines: (cur.polylines ?? []).filter((_, i) => i !== best.idx) }
+      );
+      setSelectedPoints(new Set());
+      toast("Линията е изтрита");
+      return;
     }
+
+    if (best.idx === 0) {
+      // Външният контур: заменяме го с най-голямата вътрешна фигура, ако има такава.
+      if (!contours || contours.inner.length === 0) {
+        toast("Външният контур не може да се изтрие — той е основната фигура", "err");
+        return;
+      }
+      pushUndo();
+      const areas = contours.inner.map((h) => polygonArea(h));
+      const li = areas.indexOf(Math.max(...areas));
+      setContours({
+        ...contours,
+        outer: contours.inner[li],
+        inner: contours.inner.filter((_, i) => i !== li),
+      });
+      setSelectedPoints(new Set());
+      toast("Външният контур е изтрит — най-голямата фигура стана основна");
+      return;
+    }
+
+    pushUndo();
+    setContours((cur) => cur && { ...cur, inner: cur.inner.filter((_, i) => i !== best.idx - 1) });
     setSelectedPoints(new Set());
+    toast("Контурът е изтрит");
   };
 
   const addShape = (shape: "circle" | "triangle" | "square", center: Pt) => {
@@ -517,7 +554,7 @@ export default function EditorPage() {
       return;
     }
     if (tool === "scissors") {
-      cutNearestSegment(p);
+      deleteNearestLine(p);
       return;
     }
     if (tool === "move") {
@@ -915,7 +952,7 @@ export default function EditorPage() {
             <IconTool active={tool === "move"} icon="move" label="Премести всичко" onClick={() => setTool("move")} />
             <IconTool active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => setTool("rotate")} />
             <IconTool active={tool === "delete"} icon="trash" label="Изтриване на точки" onClick={() => setTool("delete")} />
-            <IconTool active={tool === "scissors"} icon="scissors" label="Ножица (разрязване)" onClick={() => setTool("scissors")} />
+            <IconTool active={tool === "scissors"} icon="scissors" label="Ножица — клик върху линия я изтрива" onClick={() => setTool("scissors")} />
           </ToolGroup>
           <ToolGroup label="Фигури">
             <IconTool active={tool === "circle"} icon="circle" label="Кръг" onClick={() => setTool("circle")} />
@@ -1364,7 +1401,7 @@ function ToolOptions({
       {tool === "delete" && <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху точка я изтрива веднага.</p>}
 
       {tool === "scissors" && (
-        <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху сегмент го реже и го превръща в зелена отворена линия.</p>
+        <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху линия я изтрива директно: дупка, фигура или полилиния се маха цялата. Външният контур се пази (заменя се с най-голямата фигура, ако има такава).</p>
       )}
 
       {(tool === "circle" || tool === "triangle" || tool === "square") && (
