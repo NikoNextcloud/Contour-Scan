@@ -42,7 +42,8 @@ type ToolMode =
   | "polyline";
 
 type DragState =
-  | { kind: "point"; ci: number; pi: number }
+  | { kind: "drag-selected"; last: Pt; selection: Set<string> }
+  | { kind: "marquee"; additive: boolean }
   | { kind: "move-all"; start: Pt; contours: ContourSet }
   | { kind: "pan"; startX: number; startY: number; startTx: number; startTy: number }
   | null;
@@ -121,8 +122,11 @@ export default function EditorPage() {
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const pageRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const dragRef = useRef<DragState>(null);
+  const [marquee, setMarquee] = useState<{ a: Pt; b: Pt } | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     const rec = getCurrent();
@@ -136,6 +140,23 @@ export default function EditorPage() {
     };
     img.src = rec.thumbnail;
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ------------------------------ fullscreen ------------------------------ */
+
+  const toggleFullscreen = useCallback(() => {
+    if (typeof document === "undefined") return;
+    if (!document.fullscreenElement) {
+      pageRef.current?.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
   const fitView = useCallback((rec: ScanRecord) => {
@@ -258,16 +279,6 @@ export default function EditorPage() {
     setSelectedPoints(new Set());
   };
 
-  const toggleSelectedPoint = (ci: number, pi: number) => {
-    setSelectedPoints((current) => {
-      const next = new Set(current);
-      const key = pointKey(ci, pi);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
@@ -348,6 +359,21 @@ export default function EditorPage() {
     openLines.forEach((line) => drawOpen(line, "#16a34a"));
     drawOpen(polyDraft, "#e8a33d");
 
+    // Селекционен правоъгълник (marquee)
+    if (marquee) {
+      const x = Math.min(marquee.a.x, marquee.b.x);
+      const y = Math.min(marquee.a.y, marquee.b.y);
+      const w = Math.abs(marquee.b.x - marquee.a.x);
+      const h = Math.abs(marquee.b.y - marquee.a.y);
+      ctx.fillStyle = "rgba(76,141,255,0.12)";
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = "#4c8dff";
+      ctx.lineWidth = 1.5 / view.scale;
+      ctx.setLineDash([6 / view.scale, 4 / view.scale]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+    }
+
     if (tool === "rotate") {
       const center = pivot ?? (contours ? contourCenter(contours) : null);
       if (center) {
@@ -363,7 +389,7 @@ export default function EditorPage() {
         ctx.stroke();
       }
     }
-  }, [record, contours, polys, openLines, polyDraft, selectedPoints, view, grid, gridStep, tool, pivot]);
+  }, [record, contours, polys, openLines, polyDraft, selectedPoints, marquee, view, grid, gridStep, tool, pivot]);
 
   useEffect(() => {
     redraw();
@@ -384,6 +410,22 @@ export default function EditorPage() {
     setPolys(next);
     setSelectedPoints(new Set());
   };
+  const deleteSelectedRef = useRef(deleteSelectedPoints);
+  deleteSelectedRef.current = deleteSelectedPoints;
+
+  // Delete / Backspace изтрива избраните точки (освен когато пишеш в поле).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      const el = document.activeElement;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT"))
+        return;
+      e.preventDefault();
+      deleteSelectedRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const deleteNearestPoint = (p: Pt) => {
     const hit = hitPoint(p);
@@ -457,6 +499,19 @@ export default function EditorPage() {
     (e.target as Element).setPointerCapture(e.pointerId);
     const p = toImage(e);
 
+    // Middle mouse button always pans, in every tool.
+    if (e.button === 1) {
+      e.preventDefault();
+      dragRef.current = {
+        kind: "pan",
+        startX: e.clientX,
+        startY: e.clientY,
+        startTx: view.tx,
+        startTy: view.ty,
+      };
+      return;
+    }
+
     if (tool === "delete") {
       deleteNearestPoint(p);
       return;
@@ -486,19 +541,30 @@ export default function EditorPage() {
       return;
     }
 
+    // --- select tool ---
     const hit = hitPoint(p);
     if (hit) {
-      toggleSelectedPoint(hit.ci, hit.pi);
+      const key = pointKey(hit.ci, hit.pi);
+      let sel = selectedPoints;
+      if (e.shiftKey) {
+        // Shift+клик добавя/маха от селекцията.
+        sel = new Set(selectedPoints);
+        if (sel.has(key)) sel.delete(key);
+        else sel.add(key);
+        setSelectedPoints(sel);
+        return; // shift-click only edits the selection, no drag
+      }
+      if (!selectedPoints.has(key)) {
+        sel = new Set([key]);
+        setSelectedPoints(sel);
+      }
+      // Drag: точката (или цялата селекция, ако е част от нея) се мести заедно.
       pushUndo();
-      dragRef.current = { kind: "point", ...hit };
+      dragRef.current = { kind: "drag-selected", last: p, selection: sel };
     } else {
-      dragRef.current = {
-        kind: "pan",
-        startX: e.clientX,
-        startY: e.clientY,
-        startTx: view.tx,
-        startTy: view.ty,
-      };
+      // Празно място: рисуваме правоъгълник за селекция (marquee).
+      dragRef.current = { kind: "marquee", additive: e.shiftKey };
+      setMarquee({ a: p, b: p });
     }
   };
 
@@ -514,16 +580,61 @@ export default function EditorPage() {
     } else if (drag.kind === "move-all") {
       const p = toImage(e);
       setContours(translateContourSet(drag.contours, p.x - drag.start.x, p.y - drag.start.y));
-    } else {
-      const p = snapPt(toImage(e));
-      const next = polys.map((poly, ci) =>
-        ci === drag.ci ? poly.map((q, pi) => (pi === drag.pi ? p : q)) : poly
-      );
-      setPolys(next);
+    } else if (drag.kind === "marquee") {
+      const p = toImage(e);
+      setMarquee((m) => (m ? { a: m.a, b: p } : m));
+    } else if (drag.kind === "drag-selected") {
+      const p = toImage(e);
+      if (drag.selection.size === 1) {
+        // Единична точка: прилепва към мрежата при включен snap.
+        const key = [...drag.selection][0];
+        const [ci, pi] = key.split(":").map(Number);
+        const target = snapPt(p);
+        setPolys(
+          polys.map((poly, i) =>
+            i === ci ? poly.map((q, j) => (j === pi ? target : q)) : poly
+          )
+        );
+      } else {
+        // Групово местене: всички избрани точки се движат с делтата.
+        const dx = p.x - drag.last.x;
+        const dy = p.y - drag.last.y;
+        setPolys(
+          polys.map((poly, ci) =>
+            poly.map((q, pi) =>
+              drag.selection.has(pointKey(ci, pi)) ? { x: q.x + dx, y: q.y + dy } : q
+            )
+          )
+        );
+      }
+      drag.last = p;
     }
   };
 
   const onPointerUp = () => {
+    const drag = dragRef.current;
+    if (drag?.kind === "marquee") {
+      setMarquee((m) => {
+        if (m) {
+          const minX = Math.min(m.a.x, m.b.x);
+          const maxX = Math.max(m.a.x, m.b.x);
+          const minY = Math.min(m.a.y, m.b.y);
+          const maxY = Math.max(m.a.y, m.b.y);
+          const moved = maxX - minX > 2 / view.scale || maxY - minY > 2 / view.scale;
+          const next = drag.additive ? new Set(selectedPoints) : new Set<string>();
+          if (moved) {
+            polys.forEach((poly, ci) =>
+              poly.forEach((q, pi) => {
+                if (q.x >= minX && q.x <= maxX && q.y >= minY && q.y <= maxY)
+                  next.add(pointKey(ci, pi));
+              })
+            );
+          }
+          setSelectedPoints(next);
+        }
+        return null;
+      });
+    }
     dragRef.current = null;
   };
 
@@ -774,7 +885,10 @@ export default function EditorPage() {
   const shapeUnit = record.calibration ? "мм" : "px";
 
   return (
-    <div className="mx-auto max-w-[1760px]">
+    <div
+      ref={pageRef}
+      className={`mx-auto max-w-[1760px] ${isFullscreen ? "h-screen overflow-y-auto bg-paper p-4 dark:bg-ink" : ""}`}
+    >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-bold">{t.editorTitle}</h1>
@@ -782,37 +896,49 @@ export default function EditorPage() {
             {record.name} · {polys.reduce((s, p) => s + p.length, 0)} точки · избрани {selectedCount}
           </p>
         </div>
-        <button className="btn-primary" onClick={save}>
-          <Icon name="save" /> Запази
-        </button>
-      </div>
-
-      <div className="mb-3 space-y-2">
-        <div className="panel p-3">
-          <p className="mb-2 font-mono text-[11px] uppercase tracking-wider text-ink/45 dark:text-paper/45">
-            Режим на работа
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <ToolButton active={tool === "select"} icon="cursor" label="Избор" onClick={() => setTool("select")} />
-            <ToolButton active={tool === "move"} icon="move" label="Премести" onClick={() => setTool("move")} />
-            <ToolButton active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => setTool("rotate")} />
-            <ToolButton active={tool === "delete"} icon="trash" label="Изтриване" onClick={() => setTool("delete")} />
-            <ToolButton active={tool === "scissors"} icon="scissors" label="Ножица" onClick={() => setTool("scissors")} />
-            <ToolButton active={tool === "circle"} icon="circle" label="Кръг" onClick={() => setTool("circle")} />
-            <ToolButton active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => setTool("triangle")} />
-            <ToolButton active={tool === "square"} icon="square" label="Квадрат" onClick={() => setTool("square")} />
-            <ToolButton active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => setTool("polyline")} />
-            <span className="mx-1 w-px self-stretch bg-paper-3 dark:bg-ink-3" aria-hidden />
-            <ToolButton icon="undo" label="Назад" disabled={!undoStack.length} onClick={undo} />
-            <ToolButton icon="redo" label="Напред" disabled={!redoStack.length} onClick={redo} />
-            <ToolButton active={grid} icon="grid" label="Мрежа" onClick={() => setGrid(!grid)} />
-            <ToolButton active={snap} icon="magnet" label="Прилепване" onClick={() => setSnap(!snap)} />
-            <ToolButton icon="fit" label="Центрирай" onClick={() => fitView(record)} />
-          </div>
+        <div className="flex gap-2">
+          <button className="btn-ghost" onClick={toggleFullscreen}>
+            <Icon name={isFullscreen ? "exitFullscreen" : "fullscreen"} />
+            {isFullscreen ? "Изход от цял екран" : "Цял екран"}
+          </button>
+          <button className="btn-primary" onClick={save}>
+            <Icon name="save" /> Запази
+          </button>
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid gap-3 xl:grid-cols-[104px_minmax(0,1fr)_340px]">
+        {/* --- Лява лента с инструменти (стил VCarve) --- */}
+        <div className="panel h-fit p-2 xl:sticky xl:top-3">
+          <ToolGroup label="Режим">
+            <IconTool active={tool === "select"} icon="cursor" label="Избор / маркиране" onClick={() => setTool("select")} />
+            <IconTool active={tool === "move"} icon="move" label="Премести всичко" onClick={() => setTool("move")} />
+            <IconTool active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => setTool("rotate")} />
+            <IconTool active={tool === "delete"} icon="trash" label="Изтриване на точки" onClick={() => setTool("delete")} />
+            <IconTool active={tool === "scissors"} icon="scissors" label="Ножица (разрязване)" onClick={() => setTool("scissors")} />
+          </ToolGroup>
+          <ToolGroup label="Фигури">
+            <IconTool active={tool === "circle"} icon="circle" label="Кръг" onClick={() => setTool("circle")} />
+            <IconTool active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => setTool("triangle")} />
+            <IconTool active={tool === "square"} icon="square" label="Квадрат" onClick={() => setTool("square")} />
+            <IconTool active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => setTool("polyline")} />
+          </ToolGroup>
+          <ToolGroup label="Стъпки">
+            <IconTool icon="undo" label="Назад (Undo)" disabled={!undoStack.length} onClick={undo} />
+            <IconTool icon="redo" label="Напред (Redo)" disabled={!redoStack.length} onClick={redo} />
+          </ToolGroup>
+          <ToolGroup label="Изглед" last>
+            <IconTool active={grid} icon="grid" label="Мрежа" onClick={() => setGrid(!grid)} />
+            <IconTool active={snap} icon="magnet" label="Прилепване към мрежата" onClick={() => setSnap(!snap)} />
+            <IconTool icon="fit" label="Центрирай изгледа" onClick={() => fitView(record)} />
+            <IconTool
+              active={isFullscreen}
+              icon={isFullscreen ? "exitFullscreen" : "fullscreen"}
+              label={isFullscreen ? "Изход от цял екран" : "Цял екран"}
+              onClick={toggleFullscreen}
+            />
+          </ToolGroup>
+        </div>
         <div className="min-w-0">
           <div
             ref={wrapRef}
@@ -830,7 +956,7 @@ export default function EditorPage() {
             />
           </div>
           <p className="mt-2 text-xs text-ink/50 dark:text-paper/50">
-            Избор: клик върху точка. Много точки: кликай последователно. Двоен клик върху сегмент добавя точка. Десен бутон трие точка. Скрол: zoom. Влачене на празно място: местене.
+            Влачене на празно място: правоъгълник за маркиране на много точки (Shift добавя). Влачене на избрана точка мести цялата селекция. Delete трие избраните. Двоен клик върху сегмент добавя точка. Десен бутон трие точка. Скрол: zoom. Среден бутон: местене на изгледа.
           </p>
         </div>
 
@@ -1281,7 +1407,28 @@ function ToolOptions({
   );
 }
 
-function ToolButton({
+/** Vertical toolbar group with a tiny caption (VCarve-style). */
+function ToolGroup({
+  label,
+  last,
+  children,
+}: {
+  label: string;
+  last?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={last ? "" : "mb-2 border-b border-paper-3 pb-2 dark:border-ink-3"}>
+      <p className="mb-1.5 px-1 font-mono text-[10px] uppercase tracking-wider text-ink/45 dark:text-paper/45">
+        {label}
+      </p>
+      <div className="grid grid-cols-2 gap-1.5">{children}</div>
+    </div>
+  );
+}
+
+/** Compact icon-only tool button with a tooltip. */
+function IconTool({
   icon,
   label,
   active,
@@ -1296,7 +1443,7 @@ function ToolButton({
 }) {
   return (
     <button
-      className={`inline-flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`flex h-10 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
         active
           ? "border-dye bg-dye text-white dark:border-dye-bright dark:bg-dye-bright dark:text-ink"
           : "border-paper-3 bg-paper-2 hover:bg-ink/5 dark:border-ink-3 dark:bg-ink-2 dark:hover:bg-paper/5"
@@ -1304,9 +1451,9 @@ function ToolButton({
       disabled={disabled}
       onClick={onClick}
       title={label}
+      aria-label={label}
     >
       <Icon name={icon} />
-      <span>{label}</span>
     </button>
   );
 }
@@ -1341,7 +1488,9 @@ type IconName =
   | "mirrorY"
   | "align"
   | "scale"
-  | "offset";
+  | "offset"
+  | "fullscreen"
+  | "exitFullscreen";
 
 function Icon({ name }: { name: IconName }) {
   const common = {
@@ -1444,6 +1593,8 @@ function Icon({ name }: { name: IconName }) {
           <rect {...common} x="4" y="4" width="16" height="16" rx="2" strokeDasharray="3 3" />
         </>
       )}
+      {name === "fullscreen" && <path {...common} d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4" />}
+      {name === "exitFullscreen" && <path {...common} d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4" />}
     </svg>
   );
 }
