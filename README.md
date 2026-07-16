@@ -36,6 +36,8 @@ ContourScan-AI/
 - Export targets: DXF, SVG, PNG, PDF, JSON, CSV, and G-Code
 - FastAPI endpoints for scanning, contour detection, measurement, history, and export
 - OpenCV contour pipeline with fallback behavior
+- Multi-object detection for scans with several paper templates on one dark scanner mat
+- Scanner mode tuned for light paper/card details on dark backgrounds
 - Unit tests for geometry calculations
 
 ## Local Development
@@ -61,6 +63,17 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 Open `http://localhost:8000/docs`.
+
+## Preview Real Scanner Images
+
+After installing backend requirements, generate visual contour previews:
+
+```bash
+cd ContourScan-AI
+python apps/api/tools/preview_contours.py sample-scans/MDS01782.png sample-scans/MDS01789.png sample-scans/MDS01790.png --out-dir sample-contours
+```
+
+Blue lines are outer contours. Green lines are detected holes or cut-outs.
 
 ## Environment Variables
 
@@ -119,6 +132,7 @@ Backend: `http://localhost:8000`
 
 - `GET /health`
 - `POST /scan`
+- `POST /scan/multi`
 - `POST /remove-background`
 - `POST /detect-contour`
 - `POST /measure`

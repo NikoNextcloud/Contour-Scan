@@ -33,11 +33,25 @@ def health() -> dict[str, str]:
 
 
 @app.post("/scan", response_model=ScanResponse)
-async def scan(file: UploadFile = File(...), pixels_per_mm: float = 3.0, smoothing: float = 0.012) -> ScanResponse:
+async def scan(
+    file: UploadFile = File(...),
+    pixels_per_mm: float = 3.0,
+    smoothing: float = 0.012,
+    min_area_ratio: float = 0.0025,
+    max_objects: int = 8,
+) -> ScanResponse:
     payload = await file.read()
     if not payload:
         raise HTTPException(status_code=400, detail="No image uploaded")
-    return scan_image(payload, ScanOptions(pixels_per_mm=pixels_per_mm, smoothing=smoothing))
+    return scan_image(
+        payload,
+        ScanOptions(
+            pixels_per_mm=pixels_per_mm,
+            smoothing=smoothing,
+            min_area_ratio=min_area_ratio,
+            max_objects=max_objects,
+        ),
+    )
 
 
 @app.post("/remove-background")
@@ -49,6 +63,22 @@ async def remove_background(file: UploadFile = File(...)) -> dict[str, str]:
 @app.post("/detect-contour", response_model=ScanResponse)
 async def detect_contour(file: UploadFile = File(...)) -> ScanResponse:
     return await scan(file)
+
+
+@app.post("/scan/multi", response_model=ScanResponse)
+async def scan_multi(
+    file: UploadFile = File(...),
+    pixels_per_mm: float = 3.0,
+    min_area_ratio: float = 0.0025,
+    max_objects: int = 12,
+) -> ScanResponse:
+    return await scan(
+        file=file,
+        pixels_per_mm=pixels_per_mm,
+        smoothing=0.01,
+        min_area_ratio=min_area_ratio,
+        max_objects=max_objects,
+    )
 
 
 @app.post("/measure")

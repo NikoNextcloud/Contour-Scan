@@ -16,12 +16,23 @@ class Measurements(BaseModel):
     confidence: float
 
 
+class DetectedObject(BaseModel):
+    id: str
+    object_type: str = "Irregular object"
+    outer_contour: list[Point]
+    inner_contours: list[list[Point]] = Field(default_factory=list)
+    holes: list[list[Point]] = Field(default_factory=list)
+    measurements: Measurements
+    confidence: float
+
+
 class ScanResponse(BaseModel):
     object_type: str = "Irregular object"
     outer_contour: list[Point]
     inner_contours: list[list[Point]] = Field(default_factory=list)
     holes: list[list[Point]] = Field(default_factory=list)
     measurements: Measurements
+    detected_objects: list[DetectedObject] = Field(default_factory=list)
     suggestions: dict[str, str | float]
 
 
