@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useApp } from "@/lib/store";
 import { loadOpenCV } from "@/lib/opencv";
 import { detectContours, detectContoursFallback, fileToImageData } from "@/lib/pipeline";
+import { calibrationFromImageFile } from "@/lib/image-metadata";
 import { measure } from "@/lib/geometry";
 import { scanDB, newId } from "@/lib/db";
 import { setCurrent } from "@/lib/current";
@@ -23,7 +24,7 @@ import {
 type Phase = "idle" | "loadingCV" | "processing" | "ready";
 
 export default function ScannerPage() {
-  const { t, toast } = useApp();
+  const { t, toast, settings } = useApp();
   const router = useRouter();
 
   const [phase, setPhase] = useState<Phase>("idle");
@@ -79,13 +80,14 @@ export default function ScannerPage() {
     async (file: File) => {
       try {
         const { imageData } = await fileToImageData(file);
+        const autoCalibration = await calibrationFromImageFile(file, settings.scannerDpi);
         const canvas = document.createElement("canvas");
         canvas.width = imageData.width;
         canvas.height = imageData.height;
         canvas.getContext("2d")!.putImageData(imageData, 0, 0);
         imageRef.current = { data: imageData, canvas };
         setContours(null);
-        setCalibration(null);
+        setCalibration(autoCalibration);
         setCalibPts([]);
         setCalibMode(false);
         await runDetection(params);
@@ -93,7 +95,7 @@ export default function ScannerPage() {
         setError(String(e?.message ?? t.error));
       }
     },
-    [params, runDetection, t.error]
+    [params, runDetection, settings.scannerDpi, t.error]
   );
 
   // Re-run detection with debounce when parameters change.

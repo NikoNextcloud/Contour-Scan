@@ -73,6 +73,23 @@ export default function SettingsPage() {
             ))}
           </select>
         </div>
+        <div>
+          <label className="mb-1 block text-xs uppercase tracking-wide text-ink/60 dark:text-paper/60">
+            Scanner DPI
+          </label>
+          <input
+            className="field readout"
+            type="number"
+            min={72}
+            max={2400}
+            step={1}
+            value={settings.scannerDpi}
+            onChange={(e) => update({ scannerDpi: Math.max(72, parseInt(e.target.value, 10) || 300) })}
+          />
+          <p className="mt-1 text-xs text-ink/50 dark:text-paper/50">
+            За твоя A3 2400S скенер остави 300 DPI. Това запазва реалния мащаб в mm, DXF и SVG.
+          </p>
+        </div>
       </div>
     </div>
   );

@@ -12,9 +12,11 @@ export interface Settings {
   precision: number;
   /** Default Chaikin smoothing iterations applied by the editor's Smooth tool. */
   smoothing: number;
+  /** Scanner resolution used when image files do not expose DPI metadata. */
+  scannerDpi: number;
 }
 
-const DEFAULT_SETTINGS: Settings = { lang: "bg", theme: "dark", precision: 2, smoothing: 1 };
+const DEFAULT_SETTINGS: Settings = { lang: "bg", theme: "dark", precision: 2, smoothing: 1, scannerDpi: 300 };
 const SETTINGS_KEY = "contourscan.settings";
 
 interface AppState {
