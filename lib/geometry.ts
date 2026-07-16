@@ -148,6 +148,7 @@ export function smoothContourSet(contours: ContourSet, iterations: number): Cont
   return {
     outer: chaikin(contours.outer, safeIterations),
     inner: contours.inner.map((hole) => chaikin(hole, Math.max(0, safeIterations - 1))),
+    polylines: contours.polylines,
   };
 }
 
@@ -161,6 +162,7 @@ export function mirrorContourSet(
   return {
     outer,
     inner: mirrorInnerContours(contours.inner, mode),
+    polylines: contours.polylines,
   };
 }
 

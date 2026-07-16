@@ -4,7 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useApp } from "@/lib/store";
 import { loadOpenCV } from "@/lib/opencv";
-import { detectContours, detectContoursFallback, fileToImageData } from "@/lib/pipeline";
+import {
+  DEFAULT_IMAGE_OPTIONS,
+  applyImageOptions,
+  detectContours,
+  detectContoursFallback,
+  fileToImageData,
+  type ImageOptions,
+} from "@/lib/pipeline";
 import { calibrationFromImageFile } from "@/lib/image-metadata";
 import { measure, mirrorContourSet, smoothContourSet } from "@/lib/geometry";
 import { scanDB, newId } from "@/lib/db";
@@ -30,6 +37,7 @@ export default function ScannerPage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [params, setParams] = useState<PipelineParams>(DEFAULT_PARAMS);
+  const [imageOptions, setImageOptions] = useState<ImageOptions>(DEFAULT_IMAGE_OPTIONS);
   const [contours, setContours] = useState<ContourSet | null>(null);
   const [calibration, setCalibration] = useState<Calibration | null>(null);
 
@@ -41,13 +49,15 @@ export default function ScannerPage() {
   const [calibPreset, setCalibPreset] = useState("custom");
 
   // Source image (processing resolution) lives outside React state.
-  const imageRef = useRef<{ data: ImageData; canvas: HTMLCanvasElement } | null>(null);
+  const imageRef = useRef<{ data: ImageData; original: ImageData; canvas: HTMLCanvasElement } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [drag, setDrag] = useState(false);
+  const [scanView, setScanView] = useState({ zoom: 1, tx: 0, ty: 0 });
+  const scanPanRef = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
 
   const measurements = useMemo(() => (contours ? measure(contours) : null), [contours]);
 
@@ -78,16 +88,32 @@ export default function ScannerPage() {
     [t.noContour]
   );
 
+  const applyImageOptionsToCurrent = useCallback(
+    async (nextOptions: ImageOptions, nextParams = params) => {
+      const img = imageRef.current;
+      if (!img) return;
+      const adjusted = applyImageOptions(img.original, nextOptions);
+      const canvas = document.createElement("canvas");
+      canvas.width = adjusted.width;
+      canvas.height = adjusted.height;
+      canvas.getContext("2d")!.putImageData(adjusted, 0, 0);
+      imageRef.current = { ...img, data: adjusted, canvas };
+      await runDetection(nextParams);
+    },
+    [params, runDetection]
+  );
+
   const onFile = useCallback(
     async (file: File) => {
       try {
         const { imageData } = await fileToImageData(file);
         const autoCalibration = await calibrationFromImageFile(file, settings.scannerDpi);
+        const adjusted = applyImageOptions(imageData, imageOptions);
         const canvas = document.createElement("canvas");
-        canvas.width = imageData.width;
-        canvas.height = imageData.height;
-        canvas.getContext("2d")!.putImageData(imageData, 0, 0);
-        imageRef.current = { data: imageData, canvas };
+        canvas.width = adjusted.width;
+        canvas.height = adjusted.height;
+        canvas.getContext("2d")!.putImageData(adjusted, 0, 0);
+        imageRef.current = { data: adjusted, original: imageData, canvas };
         setContours(null);
         setCalibration(autoCalibration);
         setCalibPts([]);
@@ -97,7 +123,7 @@ export default function ScannerPage() {
         setError(String(e?.message ?? t.error));
       }
     },
-    [params, runDetection, settings.scannerDpi, t.error]
+    [params, runDetection, settings.scannerDpi, imageOptions, t.error]
   );
 
   // Re-run detection with debounce when parameters change.
@@ -109,6 +135,14 @@ export default function ScannerPage() {
     debounceRef.current = setTimeout(() => runDetection(next), 350);
   };
 
+  const updateImageOptions = (patch: Partial<ImageOptions>) => {
+    const next = { ...imageOptions, ...patch };
+    setImageOptions(next);
+    if (!imageRef.current) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => applyImageOptionsToCurrent(next), 350);
+  };
+
   /* ------------------------------- drawing ------------------------------- */
 
   const redraw = useCallback(() => {
@@ -118,7 +152,8 @@ export default function ScannerPage() {
     if (!img || !canvas || !wrap) return;
 
     const displayW = wrap.clientWidth;
-    const scale = displayW / img.canvas.width;
+    const baseScale = displayW / img.canvas.width;
+    const scale = baseScale * scanView.zoom;
     const displayH = Math.round(img.canvas.height * scale);
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(displayW * dpr);
@@ -127,7 +162,7 @@ export default function ScannerPage() {
     canvas.style.height = `${displayH}px`;
 
     const ctx = canvas.getContext("2d")!;
-    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * scanView.tx, dpr * scanView.ty);
     ctx.drawImage(img.canvas, 0, 0);
 
     const drawPoly = (pts: Pt[], color: string) => {
@@ -162,7 +197,24 @@ export default function ScannerPage() {
         ctx.stroke();
       }
     }
-  }, [contours, calibPts]);
+  }, [contours, calibPts, scanView]);
+
+  const onScanWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    setScanView((view) => ({ ...view, zoom: Math.max(0.25, Math.min(6, view.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12))) }));
+  };
+
+  const onScanPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!imageRef.current) return;
+    (e.target as Element).setPointerCapture(e.pointerId);
+    scanPanRef.current = { x: e.clientX, y: e.clientY, tx: scanView.tx, ty: scanView.ty };
+  };
+
+  const onScanPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const pan = scanPanRef.current;
+    if (!pan) return;
+    setScanView((view) => ({ ...view, tx: pan.tx + e.clientX - pan.x, ty: pan.ty + e.clientY - pan.y }));
+  };
 
   useEffect(() => {
     redraw();
@@ -179,8 +231,12 @@ export default function ScannerPage() {
     if (!calibMode || !imageRef.current) return;
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
-    const scale = imageRef.current.canvas.width / rect.width;
-    const p: Pt = { x: (e.clientX - rect.left) * scale, y: (e.clientY - rect.top) * scale };
+    const baseScale = rect.width / imageRef.current.canvas.width;
+    const scale = baseScale * scanView.zoom;
+    const p: Pt = {
+      x: (e.clientX - rect.left - scanView.tx) / scale,
+      y: (e.clientY - rect.top - scanView.ty) / scale,
+    };
     const next = [...calibPts, p].slice(-2);
     setCalibPts(next);
     if (next.length === 2) {
@@ -334,6 +390,10 @@ export default function ScannerPage() {
               <canvas
                 ref={canvasRef}
                 onClick={onCanvasClick}
+                onWheel={onScanWheel}
+                onPointerDown={onScanPointerDown}
+                onPointerMove={onScanPointerMove}
+                onPointerUp={() => (scanPanRef.current = null)}
                 className={`block w-full ${calibMode ? "cursor-crosshair" : ""}`}
               />
               {(phase === "loadingCV" || phase === "processing") && (
@@ -439,12 +499,49 @@ export default function ScannerPage() {
               </div>
             </section>
 
+            <section className="panel p-4">
+              <h2 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
+                A3 2400S Scanner
+              </h2>
+              <p className="mb-3 text-xs text-ink/55 dark:text-paper/55">
+                Директно управление на TWAIN/WIA скенер от Vercel браузър не е разрешено от Windows/Chrome.
+                Сканирай с A3 2400S Panel към Desktop\Скенер като BMP 300 DPI, после зареди файла тук.
+              </p>
+              <button className="btn-ghost w-full" onClick={() => fileInputRef.current?.click()}>
+                Зареди последния BMP скан
+              </button>
+            </section>
+
             {/* Pipeline parameters */}
             <section className="panel p-4">
               <h2 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
                 {t.paramsTitle}
               </h2>
               <div className="space-y-4 text-sm">
+                <Slider
+                  label="Zoom"
+                  min={0.25}
+                  max={6}
+                  step={0.05}
+                  value={scanView.zoom}
+                  onChange={(v) => setScanView((view) => ({ ...view, zoom: v }))}
+                />
+                <div className="rounded-lg border border-paper-3 p-3 dark:border-ink-3">
+                  <p className="mb-3 text-xs font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
+                    Опции на изображението
+                  </p>
+                  <Slider label="Contrast" min={-100} max={100} step={1} value={imageOptions.contrast} onChange={(v) => updateImageOptions({ contrast: v })} />
+                  <Slider label="Brightness" min={-100} max={100} step={1} value={imageOptions.brightness} onChange={(v) => updateImageOptions({ brightness: v })} />
+                  <Slider label="Gamma" min={0.2} max={3} step={0.05} value={imageOptions.gamma} onChange={(v) => updateImageOptions({ gamma: v })} />
+                  <label className="mt-3 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.invert} onChange={(e) => updateImageOptions({ invert: e.target.checked })} /> Invert</label>
+                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.grayscale} onChange={(e) => updateImageOptions({ grayscale: e.target.checked })} /> Grayscale</label>
+                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.borderEnabled} onChange={(e) => updateImageOptions({ borderEnabled: e.target.checked })} /> Add Border</label>
+                  <select className="field mt-2" value={imageOptions.borderShape} onChange={(e) => updateImageOptions({ borderShape: e.target.value as ImageOptions["borderShape"] })}>
+                    <option value="rect">Rectangular Border</option>
+                    <option value="oval">Oval Border</option>
+                  </select>
+                  <Slider label="Border width" min={0} max={80} step={1} value={imageOptions.borderWidth} onChange={(v) => updateImageOptions({ borderWidth: v })} />
+                </div>
                 <Slider
                   label={t.paramBlur}
                   min={1}

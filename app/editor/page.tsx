@@ -17,6 +17,8 @@ interface View {
   ty: number;
 }
 
+type ToolMode = "select" | "delete" | "scissors" | "circle" | "triangle" | "square" | "polyline";
+
 const clone = (c: ContourSet): ContourSet => JSON.parse(JSON.stringify(c));
 
 export default function EditorPage() {
@@ -27,6 +29,9 @@ export default function EditorPage() {
   const [view, setView] = useState<View>({ scale: 1, tx: 0, ty: 0 });
   const [grid, setGrid] = useState(true);
   const [snap, setSnap] = useState(false);
+  const [tool, setTool] = useState<ToolMode>("select");
+  const [shapeDiameterMm, setShapeDiameterMm] = useState(20);
+  const [polyDraft, setPolyDraft] = useState<Pt[]>([]);
   const [undoStack, setUndoStack] = useState<ContourSet[]>([]);
   const [redoStack, setRedoStack] = useState<ContourSet[]>([]);
 
@@ -110,9 +115,10 @@ export default function EditorPage() {
 
   /** Flat access to outer (index 0) + inner contours. */
   const polys = useMemo(() => (contours ? [contours.outer, ...contours.inner] : []), [contours]);
+  const openLines = useMemo(() => contours?.polylines ?? [], [contours]);
 
   const setPolys = (next: Pt[][]) =>
-    setContours({ outer: next[0], inner: next.slice(1) });
+    setContours((cur) => ({ outer: next[0], inner: next.slice(1), polylines: cur?.polylines ?? [] }));
 
   const toImage = (e: { clientX: number; clientY: number }): Pt => {
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -141,6 +147,11 @@ export default function EditorPage() {
       }
     }
     return null;
+  };
+
+  const diameterPx = () => {
+    const k = record?.calibration?.mmPerPx;
+    return k ? shapeDiameterMm / k : shapeDiameterMm;
   };
 
   /* ------------------------------- drawing ------------------------------- */
@@ -202,7 +213,26 @@ export default function EditorPage() {
         ctx.stroke();
       }
     });
-  }, [record, polys, view, grid, gridStep]);
+
+    const drawOpen = (pts: Pt[], color: string) => {
+      if (pts.length < 2) return;
+      ctx.beginPath();
+      pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2 / view.scale;
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      const r = 4 / view.scale;
+      for (const p of pts) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    };
+    openLines.forEach((line) => drawOpen(line, "#16a34a"));
+    drawOpen(polyDraft, "#e8a33d");
+  }, [record, polys, openLines, polyDraft, view, grid, gridStep]);
 
   useEffect(() => {
     redraw();
@@ -219,6 +249,22 @@ export default function EditorPage() {
     if (e.button === 2) return; // handled by contextmenu
     (e.target as Element).setPointerCapture(e.pointerId);
     const p = toImage(e);
+    if (tool === "delete") {
+      deleteNearestPoint(p);
+      return;
+    }
+    if (tool === "scissors") {
+      cutNearestSegment(p);
+      return;
+    }
+    if (tool === "circle" || tool === "triangle" || tool === "square") {
+      addShape(tool, snapPt(p));
+      return;
+    }
+    if (tool === "polyline") {
+      setPolyDraft((draft) => [...draft, snapPt(p)]);
+      return;
+    }
     const hit = hitPoint(p);
     if (hit) {
       pushUndo();
@@ -232,6 +278,71 @@ export default function EditorPage() {
         startTy: view.ty,
       };
     }
+  };
+
+  const deleteNearestPoint = (p: Pt) => {
+    const hit = hitPoint(p);
+    if (!hit || polys[hit.ci].length <= 3) return;
+    pushUndo();
+    const next = polys.map((poly, ci) =>
+      ci === hit.ci ? poly.filter((_, pi) => pi !== hit.pi) : poly
+    );
+    setPolys(next);
+  };
+
+  const cutNearestSegment = (p: Pt) => {
+    let best = { ci: -1, index: 0, dist: Infinity };
+    polys.forEach((poly, ci) => {
+      const seg = nearestSegment(poly, p);
+      if (seg.dist < best.dist) best = { ci, ...seg };
+    });
+    if (best.ci === -1 || best.dist > 18 / view.scale) return;
+    pushUndo();
+    const source = polys[best.ci];
+    const open = source.slice(best.index + 1).concat(source.slice(0, best.index + 1));
+    if (best.ci === 0) {
+      setContours((cur) => cur && { ...cur, polylines: [...(cur.polylines ?? []), open] });
+    } else {
+      const next = polys.filter((_, ci) => ci !== best.ci);
+      setContours((cur) => ({
+        outer: next[0],
+        inner: next.slice(1),
+        polylines: [...(cur?.polylines ?? []), open],
+      }));
+    }
+  };
+
+  const addShape = (shape: "circle" | "triangle" | "square", center: Pt) => {
+    const d = diameterPx();
+    const r = d / 2;
+    let pts: Pt[] = [];
+    if (shape === "circle") {
+      pts = Array.from({ length: 64 }, (_, i) => {
+        const a = (i / 64) * Math.PI * 2;
+        return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r };
+      });
+    } else if (shape === "triangle") {
+      pts = Array.from({ length: 3 }, (_, i) => {
+        const a = -Math.PI / 2 + (i / 3) * Math.PI * 2;
+        return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r };
+      });
+    } else {
+      pts = [
+        { x: center.x - r, y: center.y - r },
+        { x: center.x + r, y: center.y - r },
+        { x: center.x + r, y: center.y + r },
+        { x: center.x - r, y: center.y + r },
+      ];
+    }
+    pushUndo();
+    setContours((cur) => cur && { ...cur, inner: [...cur.inner, pts] });
+  };
+
+  const finishPolyline = () => {
+    if (polyDraft.length < 2) return;
+    pushUndo();
+    setContours((cur) => cur && { ...cur, polylines: [...(cur.polylines ?? []), polyDraft] });
+    setPolyDraft([]);
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -257,6 +368,10 @@ export default function EditorPage() {
   };
 
   const onDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (tool === "polyline") {
+      finishPolyline();
+      return;
+    }
     const p = toImage(e);
     let best = { ci: -1, index: 0, dist: Infinity };
     polys.forEach((poly, ci) => {
@@ -345,6 +460,52 @@ export default function EditorPage() {
 
       {/* Toolbar */}
       <div className="mb-3 flex flex-wrap gap-2">
+        <button className={tool === "select" ? "btn-primary" : "btn-ghost"} onClick={() => setTool("select")}>
+          Select
+        </button>
+        <button className={tool === "delete" ? "btn-primary" : "btn-ghost"} onClick={() => setTool("delete")}>
+          Delete point
+        </button>
+        <button className={tool === "scissors" ? "btn-primary" : "btn-ghost"} onClick={() => setTool("scissors")}>
+          Ножица
+        </button>
+        <button className={tool === "circle" ? "btn-primary" : "btn-ghost"} onClick={() => setTool("circle")}>
+          Кръг
+        </button>
+        <button className={tool === "triangle" ? "btn-primary" : "btn-ghost"} onClick={() => setTool("triangle")}>
+          Триъгълник
+        </button>
+        <button className={tool === "square" ? "btn-primary" : "btn-ghost"} onClick={() => setTool("square")}>
+          Квадрат
+        </button>
+        <button className={tool === "polyline" ? "btn-primary" : "btn-ghost"} onClick={() => setTool("polyline")}>
+          Polyline
+        </button>
+        {tool === "polyline" && (
+          <button className="btn-ghost" onClick={finishPolyline} disabled={polyDraft.length < 2}>
+            Finish line
+          </button>
+        )}
+        {polyDraft.length > 0 && (
+          <button className="btn-ghost" onClick={() => setPolyDraft([])}>
+            Clear draft
+          </button>
+        )}
+        <label className="inline-flex items-center gap-2 rounded-lg border border-paper-3 px-3 py-2 text-sm dark:border-ink-3">
+          Диаметър
+          <input
+            className="w-20 bg-transparent font-mono outline-none"
+            type="number"
+            min={1}
+            step={0.5}
+            value={shapeDiameterMm}
+            onChange={(e) => setShapeDiameterMm(Math.max(1, parseFloat(e.target.value) || 1))}
+          />
+          {record.calibration ? "mm" : "px"}
+        </label>
+        <span className="readout inline-flex items-center rounded-lg border border-paper-3 px-3 py-2 text-xs text-ink/60 dark:border-ink-3 dark:text-paper/60">
+          R {(shapeDiameterMm / 2).toFixed(2)}
+        </span>
         <button className="btn-ghost" onClick={() => applyAll((p) => chaikin(p, settings.smoothing))}>
           {t.toolSmooth}
         </button>

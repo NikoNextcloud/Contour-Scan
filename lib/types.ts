@@ -10,6 +10,8 @@ export interface ContourSet {
   outer: Pt[];
   /** Inner contours: holes / slots / cut-outs inside the object. */
   inner: Pt[][];
+  /** Open tool paths / polylines drawn by the user. */
+  polylines?: Pt[][];
 }
 
 /** Parameters that control the contour pipeline. */

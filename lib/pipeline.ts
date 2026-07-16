@@ -2,6 +2,28 @@ import type { ContourSet, PipelineParams, Pt } from "./types";
 
 type ByteArray = Uint8Array<ArrayBufferLike>;
 
+export interface ImageOptions {
+  contrast: number;
+  brightness: number;
+  gamma: number;
+  invert: boolean;
+  grayscale: boolean;
+  borderEnabled: boolean;
+  borderShape: "rect" | "oval";
+  borderWidth: number;
+}
+
+export const DEFAULT_IMAGE_OPTIONS: ImageOptions = {
+  contrast: 0,
+  brightness: 0,
+  gamma: 1,
+  invert: false,
+  grayscale: false,
+  borderEnabled: false,
+  borderShape: "rect",
+  borderWidth: 0,
+};
+
 /** Longest image side we process; larger inputs are downscaled for speed. */
 export const MAX_PROCESS_SIDE = 2400;
 
@@ -25,6 +47,62 @@ export async function fileToImageData(
   ctx.drawImage(bitmap, 0, 0, w, h);
   bitmap.close();
   return { imageData: ctx.getImageData(0, 0, w, h), originalW, originalH, scale };
+}
+
+export function applyImageOptions(imageData: ImageData, options: ImageOptions): ImageData {
+  const out = new ImageData(new Uint8ClampedArray(imageData.data), imageData.width, imageData.height);
+  const data = out.data;
+  const contrastFactor = (259 * (options.contrast + 255)) / (255 * (259 - options.contrast));
+  const gamma = Math.max(0.1, options.gamma);
+
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i];
+    let g = data[i + 1];
+    let b = data[i + 2];
+    if (options.grayscale) {
+      const y = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+      r = y;
+      g = y;
+      b = y;
+    }
+    r = adjustChannel(r, contrastFactor, options.brightness, gamma, options.invert);
+    g = adjustChannel(g, contrastFactor, options.brightness, gamma, options.invert);
+    b = adjustChannel(b, contrastFactor, options.brightness, gamma, options.invert);
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+  }
+
+  if (options.borderEnabled && options.borderWidth > 0) {
+    addBorder(out, options.borderWidth, options.borderShape);
+  }
+
+  return out;
+}
+
+function adjustChannel(value: number, contrastFactor: number, brightness: number, gamma: number, invert: boolean): number {
+  let next = contrastFactor * (value - 128) + 128 + brightness;
+  next = 255 * Math.pow(Math.max(0, Math.min(255, next)) / 255, 1 / gamma);
+  if (invert) next = 255 - next;
+  return Math.max(0, Math.min(255, Math.round(next)));
+}
+
+function addBorder(imageData: ImageData, width: number, shape: "rect" | "oval") {
+  const canvas = document.createElement("canvas");
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.putImageData(imageData, 0, 0);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = Math.max(1, width);
+  if (shape === "oval") {
+    ctx.beginPath();
+    ctx.ellipse(canvas.width / 2, canvas.height / 2, canvas.width / 2 - width, canvas.height / 2 - width, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(width / 2, width / 2, canvas.width - width, canvas.height - width);
+  }
+  imageData.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 }
 
 async function blobToBitmap(file: Blob): Promise<ImageBitmap> {
