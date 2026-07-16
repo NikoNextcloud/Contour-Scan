@@ -1,1 +1,0 @@
-"""ContourScan AI FastAPI package."""

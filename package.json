@@ -1,21 +1,30 @@
 {
   "name": "contourscan-ai",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Production-ready contour extraction platform for CNC, laser cutting, vinyl, printing, CAD, and manufacturing.",
-  "workspaces": [
-    "apps/web"
-  ],
+  "description": "Client-side contour extraction for CNC, laser and vinyl cutting. Photo in — DXF/SVG out.",
   "scripts": {
-    "dev": "npm --workspace apps/web run dev",
-    "build": "npm --workspace apps/web run build",
-    "lint": "npm --workspace apps/web run lint",
-    "typecheck": "npm --workspace apps/web run typecheck",
-    "test": "npm --workspace apps/web run typecheck && python -m pytest apps/api/tests"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "format": "prettier --write ."
   },
-  "engines": {
-    "node": ">=20.0.0",
-    "npm": ">=10.0.0"
+  "dependencies": {
+    "next": "^15.3.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   },
-  "license": "MIT"
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.6",
+    "@tailwindcss/postcss": "^4.1.8",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "eslint": "^9.28.0",
+    "eslint-config-next": "^15.3.3",
+    "prettier": "^3.5.3",
+    "tailwindcss": "^4.1.8",
+    "typescript": "^5.8.3"
+  }
 }
