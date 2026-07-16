@@ -75,7 +75,7 @@ export default function SettingsPage() {
         </div>
         <div>
           <label className="mb-1 block text-xs uppercase tracking-wide text-ink/60 dark:text-paper/60">
-            Scanner DPI
+            DPI на скенера
           </label>
           <input
             className="field readout"

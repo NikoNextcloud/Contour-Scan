@@ -519,7 +519,7 @@ export default function ScannerPage() {
               </h2>
               <div className="space-y-4 text-sm">
                 <Slider
-                  label="Zoom"
+                  label="Мащаб"
                   min={0.25}
                   max={6}
                   step={0.05}
@@ -530,17 +530,17 @@ export default function ScannerPage() {
                   <p className="mb-3 text-xs font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
                     Опции на изображението
                   </p>
-                  <Slider label="Contrast" min={-100} max={100} step={1} value={imageOptions.contrast} onChange={(v) => updateImageOptions({ contrast: v })} />
-                  <Slider label="Brightness" min={-100} max={100} step={1} value={imageOptions.brightness} onChange={(v) => updateImageOptions({ brightness: v })} />
-                  <Slider label="Gamma" min={0.2} max={3} step={0.05} value={imageOptions.gamma} onChange={(v) => updateImageOptions({ gamma: v })} />
-                  <label className="mt-3 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.invert} onChange={(e) => updateImageOptions({ invert: e.target.checked })} /> Invert</label>
-                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.grayscale} onChange={(e) => updateImageOptions({ grayscale: e.target.checked })} /> Grayscale</label>
-                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.borderEnabled} onChange={(e) => updateImageOptions({ borderEnabled: e.target.checked })} /> Add Border</label>
+                  <Slider label="Контраст" min={-100} max={100} step={1} value={imageOptions.contrast} onChange={(v) => updateImageOptions({ contrast: v })} />
+                  <Slider label="Яркост" min={-100} max={100} step={1} value={imageOptions.brightness} onChange={(v) => updateImageOptions({ brightness: v })} />
+                  <Slider label="Гама" min={0.2} max={3} step={0.05} value={imageOptions.gamma} onChange={(v) => updateImageOptions({ gamma: v })} />
+                  <label className="mt-3 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.invert} onChange={(e) => updateImageOptions({ invert: e.target.checked })} /> Инвертиране</label>
+                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.grayscale} onChange={(e) => updateImageOptions({ grayscale: e.target.checked })} /> Черно-бяло</label>
+                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.borderEnabled} onChange={(e) => updateImageOptions({ borderEnabled: e.target.checked })} /> Добави рамка</label>
                   <select className="field mt-2" value={imageOptions.borderShape} onChange={(e) => updateImageOptions({ borderShape: e.target.value as ImageOptions["borderShape"] })}>
-                    <option value="rect">Rectangular Border</option>
-                    <option value="oval">Oval Border</option>
+                    <option value="rect">Правоъгълна рамка</option>
+                    <option value="oval">Овална рамка</option>
                   </select>
-                  <Slider label="Border width" min={0} max={80} step={1} value={imageOptions.borderWidth} onChange={(v) => updateImageOptions({ borderWidth: v })} />
+                  <Slider label="Дебелина на рамката" min={0} max={80} step={1} value={imageOptions.borderWidth} onChange={(v) => updateImageOptions({ borderWidth: v })} />
                 </div>
                 <Slider
                   label={t.paramBlur}
