@@ -5,7 +5,21 @@ import Link from "next/link";
 import { useApp } from "@/lib/store";
 import { getCurrent, setCurrent } from "@/lib/current";
 import { scanDB } from "@/lib/db";
-import { chaikin, measure, nearestSegment, simplify } from "@/lib/geometry";
+import {
+  chaikin,
+  chamferCorner,
+  despike,
+  filletCorner,
+  measure,
+  minAreaRect,
+  nearestSegment,
+  offsetPolygon,
+  resampleClosed,
+  scaleAround,
+  simplify,
+  smoothIndices,
+  straighten,
+} from "@/lib/geometry";
 import MeasurementsPanel from "@/components/MeasurementsPanel";
 import ExportButtons from "@/components/ExportButtons";
 import type { ContourSet, Pt, ScanRecord } from "@/lib/types";
@@ -95,6 +109,15 @@ export default function EditorPage() {
   const [selectedPoints, setSelectedPoints] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<ContourSet[]>([]);
   const [redoStack, setRedoStack] = useState<ContourSet[]>([]);
+  // Repair & transform parameters (mm when calibrated, px otherwise)
+  const [cornerRadius, setCornerRadius] = useState(3);
+  const [resampleStep, setResampleStep] = useState(2);
+  const [offsetMm, setOffsetMm] = useState(0.5);
+  const [scaleMode, setScaleMode] = useState<"percent" | "width">("percent");
+  const [scalePct, setScalePct] = useState(100);
+  const [scaleTargetWidth, setScaleTargetWidth] = useState(100);
+  const [smoothStrength, setSmoothStrength] = useState(settings.smoothing);
+  const [simplifyEps, setSimplifyEps] = useState(2);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -549,6 +572,179 @@ export default function EditorPage() {
     setPolys(polys.map(fn));
   };
 
+  /* ------------------------- repair & transform ops ------------------------- */
+
+  /** Selected point indices grouped per contour index. */
+  const selectedByContour = (): Map<number, number[]> => {
+    const map = new Map<number, number[]>();
+    for (const key of selectedPoints) {
+      const [ci, pi] = key.split(":").map(Number);
+      if (!map.has(ci)) map.set(ci, []);
+      map.get(ci)!.push(pi);
+    }
+    return map;
+  };
+
+  const selectAllPoints = () => {
+    const next = new Set<string>();
+    polys.forEach((poly, ci) => poly.forEach((_, pi) => next.add(pointKey(ci, pi))));
+    setSelectedPoints(next);
+  };
+
+  const selectWholeContour = () => {
+    // Expand: every contour that has at least one selected point gets fully selected.
+    const map = selectedByContour();
+    if (!map.size) return toast("Първо избери точка от контур", "err");
+    const next = new Set(selectedPoints);
+    for (const ci of map.keys()) polys[ci]?.forEach((_, pi) => next.add(pointKey(ci, pi)));
+    setSelectedPoints(next);
+  };
+
+  const deleteWholeContour = () => {
+    const map = selectedByContour();
+    if (!map.size) return toast("Първо избери точка от контура", "err");
+    if (map.has(0) && map.size === 1)
+      return toast("Външният контур не може да се изтрие", "err");
+    pushUndo();
+    const drop = new Set([...map.keys()].filter((ci) => ci !== 0));
+    const next = polys.filter((_, ci) => !drop.has(ci));
+    setPolys(next);
+    toast("Контурът е изтрит");
+  };
+
+  const straightenSelected = () => {
+    const map = selectedByContour();
+    const entry = [...map.entries()].find(([, idx]) => idx.length >= 3);
+    if (!entry) return toast("Избери поне 3 точки от един контур", "err");
+    pushUndo();
+    const [ci, idx] = entry;
+    setPolys(polys.map((poly, i) => (i === ci ? straighten(poly, idx) : poly)));
+    toast("Участъкът е изправен");
+  };
+
+  const smoothSelected = () => {
+    const map = selectedByContour();
+    if (!map.size) return toast("Избери точки за изглаждане", "err");
+    pushUndo();
+    setPolys(
+      polys.map((poly, ci) => {
+        const idx = map.get(ci);
+        return idx ? smoothIndices(poly, new Set(idx), 0.6) : poly;
+      })
+    );
+    toast("Избраното е изгладено");
+  };
+
+  const filletSelected = () => {
+    const map = selectedByContour();
+    if (!map.size) return toast("Избери ъгли за закръгляне", "err");
+    const r = distanceToPx(cornerRadius);
+    pushUndo();
+    setPolys(
+      polys.map((poly, ci) => {
+        const idx = map.get(ci);
+        if (!idx) return poly;
+        let out = poly;
+        // Descending order keeps earlier indices valid while the array grows.
+        for (const pi of [...idx].sort((a, b) => b - a)) out = filletCorner(out, pi, r);
+        return out;
+      })
+    );
+    setSelectedPoints(new Set());
+    toast(`Закръглени ъгли: R ${cornerRadius} ${shapeUnitLabel()}`);
+  };
+
+  const chamferSelected = () => {
+    const map = selectedByContour();
+    if (!map.size) return toast("Избери ъгли за фаска", "err");
+    const d = distanceToPx(cornerRadius);
+    pushUndo();
+    setPolys(
+      polys.map((poly, ci) => {
+        const idx = map.get(ci);
+        if (!idx) return poly;
+        let out = poly;
+        for (const pi of [...idx].sort((a, b) => b - a)) out = chamferCorner(out, pi, d);
+        return out;
+      })
+    );
+    setSelectedPoints(new Set());
+    toast(`Фаска: ${cornerRadius} ${shapeUnitLabel()}`);
+  };
+
+  const despikeAll = () => {
+    pushUndo();
+    setPolys(polys.map((p) => despike(p, 25)));
+    setSelectedPoints(new Set());
+    toast("Шиповете са премахнати");
+  };
+
+  const resampleAll = () => {
+    const spacing = distanceToPx(resampleStep);
+    if (spacing <= 0) return;
+    pushUndo();
+    setPolys(polys.map((p) => resampleClosed(p, spacing)));
+    setSelectedPoints(new Set());
+    toast(`Точките са преразпределени на ${resampleStep} ${shapeUnitLabel()}`);
+  };
+
+  const mirror = (axis: "x" | "y") => {
+    if (!contours) return;
+    pushUndo();
+    const c = contourCenter(contours);
+    setContours(
+      mapContourSet(contours, (p) =>
+        axis === "x" ? { x: 2 * c.x - p.x, y: p.y } : { x: p.x, y: 2 * c.y - p.y }
+      )
+    );
+    toast(axis === "x" ? "Огледално по X" : "Огледално по Y");
+  };
+
+  const axisAlign = () => {
+    if (!contours) return;
+    const rect = minAreaRect(contours.outer);
+    let angle = rect.angleDeg % 90;
+    if (angle > 45) angle -= 90;
+    if (angle < -45) angle += 90;
+    if (Math.abs(angle) < 0.01) return toast("Контурът вече е изравнен");
+    pushUndo();
+    setContours(rotateContourSet(contours, contourCenter(contours), -angle));
+    toast(`Изравнено (${(-angle).toFixed(2)}°)`);
+  };
+
+  const applyScale = () => {
+    if (!contours) return;
+    let factor = scalePct / 100;
+    if (scaleMode === "width") {
+      const m = measure(contours);
+      const targetPx = distanceToPx(scaleTargetWidth);
+      if (targetPx <= 0 || m.widthPx <= 0) return;
+      factor = targetPx / m.widthPx;
+    }
+    if (!Number.isFinite(factor) || factor <= 0) return;
+    pushUndo();
+    const c = contourCenter(contours);
+    setContours(mapContourSet(contours, (p) => scaleAround([p], c, factor)[0]));
+    toast(`Мащаб ×${factor.toFixed(3)}`);
+  };
+
+  const applyOffset = () => {
+    if (!contours) return;
+    const d = distanceToPx(offsetMm);
+    if (!d) return;
+    pushUndo();
+    // Kerf logic: outer grows outward, holes shrink inward for positive offset.
+    setContours({
+      ...contours,
+      outer: offsetPolygon(contours.outer, d),
+      inner: contours.inner.map((h) => offsetPolygon(h, -d)),
+    });
+    toast(`Офсет ${offsetMm > 0 ? "+" : ""}${offsetMm} ${shapeUnitLabel()}`);
+  };
+
+  const shapeUnitLabel = () => (record?.calibration ? "мм" : "px");
+
+
   const save = async () => {
     if (!record || !contours) return;
     const updated: ScanRecord = { ...record, contours, measurements: measure(contours) };
@@ -591,54 +787,32 @@ export default function EditorPage() {
         </button>
       </div>
 
-      <div className="mb-3 grid gap-3 xl:grid-cols-[1fr_340px]">
-        <div className="panel flex flex-wrap gap-2 p-3">
-          <ToolButton active={tool === "select"} icon="cursor" label="Избор" onClick={() => setTool("select")} />
-          <ToolButton active={tool === "move"} icon="move" label="Премести" onClick={() => setTool("move")} />
-          <ToolButton active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => setTool("rotate")} />
-          <ToolButton active={tool === "delete"} icon="trash" label="Изтриване" onClick={() => setTool("delete")} />
-          <ToolButton active={tool === "scissors"} icon="scissors" label="Ножица" onClick={() => setTool("scissors")} />
-          <ToolButton active={tool === "circle"} icon="circle" label="Кръг" onClick={() => setTool("circle")} />
-          <ToolButton active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => setTool("triangle")} />
-          <ToolButton active={tool === "square"} icon="square" label="Квадрат" onClick={() => setTool("square")} />
-          <ToolButton active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => setTool("polyline")} />
-          <ToolButton icon="smooth" label="Изглади" onClick={() => applyAll((p) => chaikin(p, settings.smoothing))} />
-          <ToolButton icon="simplify" label="Опрости" onClick={() => applyAll((p) => simplify(p, 2))} />
-          <ToolButton icon="undo" label="Назад" disabled={!undoStack.length} onClick={undo} />
-          <ToolButton icon="redo" label="Напред" disabled={!redoStack.length} onClick={redo} />
-          <ToolButton active={grid} icon="grid" label="Мрежа" onClick={() => setGrid(!grid)} />
-          <ToolButton active={snap} icon="magnet" label="Прилепване" onClick={() => setSnap(!snap)} />
-          <ToolButton icon="fit" label="Центрирай" onClick={() => fitView(record)} />
+      <div className="mb-3 space-y-2">
+        <div className="panel p-3">
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-wider text-ink/45 dark:text-paper/45">
+            Режим на работа
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <ToolButton active={tool === "select"} icon="cursor" label="Избор" onClick={() => setTool("select")} />
+            <ToolButton active={tool === "move"} icon="move" label="Премести" onClick={() => setTool("move")} />
+            <ToolButton active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => setTool("rotate")} />
+            <ToolButton active={tool === "delete"} icon="trash" label="Изтриване" onClick={() => setTool("delete")} />
+            <ToolButton active={tool === "scissors"} icon="scissors" label="Ножица" onClick={() => setTool("scissors")} />
+            <ToolButton active={tool === "circle"} icon="circle" label="Кръг" onClick={() => setTool("circle")} />
+            <ToolButton active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => setTool("triangle")} />
+            <ToolButton active={tool === "square"} icon="square" label="Квадрат" onClick={() => setTool("square")} />
+            <ToolButton active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => setTool("polyline")} />
+            <span className="mx-1 w-px self-stretch bg-paper-3 dark:bg-ink-3" aria-hidden />
+            <ToolButton icon="undo" label="Назад" disabled={!undoStack.length} onClick={undo} />
+            <ToolButton icon="redo" label="Напред" disabled={!redoStack.length} onClick={redo} />
+            <ToolButton active={grid} icon="grid" label="Мрежа" onClick={() => setGrid(!grid)} />
+            <ToolButton active={snap} icon="magnet" label="Прилепване" onClick={() => setSnap(!snap)} />
+            <ToolButton icon="fit" label="Центрирай" onClick={() => fitView(record)} />
+          </div>
         </div>
-
-        <ToolOptions
-          tool={tool}
-          diameter={shapeDiameter}
-          unit={shapeUnit}
-          selectedCount={selectedCount}
-          polyCount={polyDraft.length}
-          moveDx={moveDx}
-          moveDy={moveDy}
-          pivot={pivot ?? contourCenter(contours)}
-          usePivotCoordinates={usePivotCoordinates}
-          rotationType={rotationType}
-          rotationAngle={rotationAngle}
-          onDiameter={setShapeDiameter}
-          onMoveDx={setMoveDx}
-          onMoveDy={setMoveDy}
-          onApplyMove={applyMove}
-          onPivot={setPivot}
-          onUsePivotCoordinates={setUsePivotCoordinates}
-          onRotationType={setRotationType}
-          onRotationAngle={setRotationAngle}
-          onApplyRotation={applyRotation}
-          onDeleteSelected={deleteSelectedPoints}
-          onFinishPolyline={finishPolyline}
-          onClearPolyline={() => setPolyDraft([])}
-        />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
         <div className="min-w-0">
           <div
             ref={wrapRef}
@@ -660,7 +834,172 @@ export default function EditorPage() {
           </p>
         </div>
 
-        <div className="space-y-3">
+        <div className="max-h-[85vh] space-y-3 overflow-y-auto pr-1">
+          <ToolOptions
+            tool={tool}
+            diameter={shapeDiameter}
+            unit={shapeUnit}
+            selectedCount={selectedCount}
+            polyCount={polyDraft.length}
+            moveDx={moveDx}
+            moveDy={moveDy}
+            pivot={pivot ?? contourCenter(contours)}
+            usePivotCoordinates={usePivotCoordinates}
+            rotationType={rotationType}
+            rotationAngle={rotationAngle}
+            onDiameter={setShapeDiameter}
+            onMoveDx={setMoveDx}
+            onMoveDy={setMoveDy}
+            onApplyMove={applyMove}
+            onPivot={setPivot}
+            onUsePivotCoordinates={setUsePivotCoordinates}
+            onRotationType={setRotationType}
+            onRotationAngle={setRotationAngle}
+            onApplyRotation={applyRotation}
+            onDeleteSelected={deleteSelectedPoints}
+            onFinishPolyline={finishPolyline}
+            onClearPolyline={() => setPolyDraft([])}
+          />
+
+          {/* --- Селекция --- */}
+          <Section title="Селекция" hint={`Избрани точки: ${selectedCount}`}>
+            <div className="grid grid-cols-2 gap-2">
+              <button className="btn-ghost" onClick={selectAllPoints}>
+                <Icon name="selectAll" /> Всички
+              </button>
+              <button className="btn-ghost" disabled={!selectedCount} onClick={() => setSelectedPoints(new Set())}>
+                <Icon name="deselect" /> Изчисти
+              </button>
+              <button className="btn-ghost" disabled={!selectedCount} onClick={selectWholeContour}>
+                <Icon name="contour" /> Цял контур
+              </button>
+              <button
+                className="btn-ghost text-red-500 hover:bg-red-500/10"
+                disabled={!selectedCount}
+                onClick={deleteWholeContour}
+              >
+                <Icon name="trash" /> Изтрий контура
+              </button>
+            </div>
+            <button className="btn-ghost mt-2 w-full" disabled={!selectedCount} onClick={deleteSelectedPoints}>
+              <Icon name="trash" /> Изтрий избраните точки
+            </button>
+          </Section>
+
+          {/* --- Поправка на контура --- */}
+          <Section title="Поправка на контура" hint="Ъгловите операции работят върху избраните точки">
+            <div className="grid grid-cols-2 gap-2">
+              <button className="btn-ghost" disabled={selectedCount < 3} onClick={straightenSelected}>
+                <Icon name="straighten" /> Изправи
+              </button>
+              <button className="btn-ghost" disabled={!selectedCount} onClick={smoothSelected}>
+                <Icon name="smooth" /> Изглади избр.
+              </button>
+              <button className="btn-ghost" disabled={!selectedCount} onClick={filletSelected}>
+                <Icon name="fillet" /> Закръгли ъгъл
+              </button>
+              <button className="btn-ghost" disabled={!selectedCount} onClick={chamferSelected}>
+                <Icon name="chamfer" /> Фаска
+              </button>
+            </div>
+            <NumberRow
+              label={`Радиус / фаска (${shapeUnit})`}
+              value={cornerRadius}
+              step={0.5}
+              min={0.1}
+              onChange={setCornerRadius}
+            />
+            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
+            <div className="grid grid-cols-2 gap-2">
+              <button className="btn-ghost" onClick={despikeAll}>
+                <Icon name="despike" /> Махни шипове
+              </button>
+              <button className="btn-ghost" onClick={resampleAll}>
+                <Icon name="resample" /> Преразпредели
+              </button>
+            </div>
+            <NumberRow
+              label={`Стъпка между точки (${shapeUnit})`}
+              value={resampleStep}
+              step={0.5}
+              min={0.2}
+              onChange={setResampleStep}
+            />
+            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  applyAll((p) => chaikin(p, smoothStrength));
+                  toast("Контурът е изгладен");
+                }}
+              >
+                <Icon name="smooth" /> Изглади всичко
+              </button>
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  applyAll((p) => simplify(p, simplifyEps));
+                  toast("Контурът е опростен");
+                }}
+              >
+                <Icon name="simplify" /> Опрости
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <NumberRow label="Сила ×" value={smoothStrength} step={1} min={1} max={4} onChange={(v) => setSmoothStrength(Math.round(v))} />
+              <NumberRow label="Допуск (px)" value={simplifyEps} step={0.5} min={0.5} onChange={setSimplifyEps} />
+            </div>
+          </Section>
+
+          {/* --- Трансформации --- */}
+          <Section title="Трансформации" hint="Прилагат се върху целия чертеж">
+            <div className="grid grid-cols-3 gap-2">
+              <button className="btn-ghost" onClick={() => mirror("x")}>
+                <Icon name="mirrorX" /> Огл. X
+              </button>
+              <button className="btn-ghost" onClick={() => mirror("y")}>
+                <Icon name="mirrorY" /> Огл. Y
+              </button>
+              <button className="btn-ghost" onClick={axisAlign}>
+                <Icon name="align" /> Изравни
+              </button>
+            </div>
+
+            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
+            <p className="mb-1 text-xs font-medium text-ink/60 dark:text-paper/60">Мащаб</p>
+            <div className="mb-2 flex gap-3 text-sm">
+              <label className="flex items-center gap-1.5">
+                <input type="radio" checked={scaleMode === "percent"} onChange={() => setScaleMode("percent")} />
+                Процент
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input type="radio" checked={scaleMode === "width"} onChange={() => setScaleMode("width")} />
+                До ширина
+              </label>
+            </div>
+            {scaleMode === "percent" ? (
+              <NumberRow label="Мащаб (%)" value={scalePct} step={1} min={1} onChange={setScalePct} />
+            ) : (
+              <NumberRow label={`Целева ширина (${shapeUnit})`} value={scaleTargetWidth} step={1} min={0.1} onChange={setScaleTargetWidth} />
+            )}
+            <button className="btn-primary mt-1 w-full" onClick={applyScale}>
+              <Icon name="scale" /> Приложи мащаб
+            </button>
+
+            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
+            <p className="mb-1 text-xs font-medium text-ink/60 dark:text-paper/60">
+              Офсет / kerf компенсация
+            </p>
+            <p className="mb-2 text-xs text-ink/50 dark:text-paper/50">
+              + разширява навън (дупките се свиват), − свива навътре. Компенсира дебелината на ножа/лазера.
+            </p>
+            <NumberRow label={`Офсет (${shapeUnit})`} value={offsetMm} step={0.1} onChange={setOffsetMm} />
+            <button className="btn-primary mt-1 w-full" onClick={applyOffset}>
+              <Icon name="offset" /> Приложи офсет
+            </button>
+          </Section>
+
           <MeasurementsPanel m={liveMeasurements} calibration={record.calibration} />
           <ExportButtons record={liveRecord} />
         </div>
@@ -668,6 +1007,64 @@ export default function EditorPage() {
     </div>
   );
 }
+
+/** Collapsible-feeling grouped panel with a header and optional hint. */
+function Section({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="panel p-3">
+      <h2 className="font-display text-sm font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
+        {title}
+      </h2>
+      {hint && <p className="mb-2 mt-0.5 text-xs text-ink/45 dark:text-paper/45">{hint}</p>}
+      {!hint && <div className="mb-2" />}
+      {children}
+    </section>
+  );
+}
+
+/** Compact labelled number input. */
+function NumberRow({
+  label,
+  value,
+  step,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  step: number;
+  min?: number;
+  max?: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block text-xs text-ink/60 dark:text-paper/60">
+      {label}
+      <input
+        className="field readout mt-1"
+        type="number"
+        step={step}
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v)) onChange(min !== undefined ? Math.max(min, v) : v);
+        }}
+      />
+    </label>
+  );
+}
+
 
 function ToolOptions({
   tool,
@@ -931,7 +1328,20 @@ type IconName =
   | "grid"
   | "magnet"
   | "fit"
-  | "save";
+  | "save"
+  | "selectAll"
+  | "deselect"
+  | "contour"
+  | "straighten"
+  | "fillet"
+  | "chamfer"
+  | "despike"
+  | "resample"
+  | "mirrorX"
+  | "mirrorY"
+  | "align"
+  | "scale"
+  | "offset";
 
 function Icon({ name }: { name: IconName }) {
   const common = {
@@ -960,6 +1370,80 @@ function Icon({ name }: { name: IconName }) {
       {name === "magnet" && <path {...common} d="M7 4v7a5 5 0 0 0 10 0V4M7 4h4M13 4h4M7 9h4M13 9h4" />}
       {name === "fit" && <path {...common} d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />}
       {name === "save" && <path {...common} d="M5 4h12l2 2v14H5zM8 4v6h8M8 20v-6h8v6" />}
+      {name === "selectAll" && (
+        <>
+          <rect {...common} x="4" y="4" width="16" height="16" rx="2" strokeDasharray="3 3" />
+          <path {...common} d="M9 12l2 2 4-4" />
+        </>
+      )}
+      {name === "deselect" && (
+        <>
+          <rect {...common} x="4" y="4" width="16" height="16" rx="2" strokeDasharray="3 3" />
+          <path {...common} d="M9 9l6 6M15 9l-6 6" />
+        </>
+      )}
+      {name === "contour" && (
+        <>
+          <path {...common} d="M6 5 Q4 5 5 8 L7 17 Q7.5 19.5 10 19 L18 17 Q20 16.5 19.5 14 L18 6 Q17.5 4 15 4.5 Z" />
+          <circle cx="6" cy="5" r="1.6" fill="currentColor" stroke="none" />
+          <circle cx="18" cy="6" r="1.6" fill="currentColor" stroke="none" />
+          <circle cx="10" cy="19" r="1.6" fill="currentColor" stroke="none" />
+        </>
+      )}
+      {name === "straighten" && (
+        <>
+          <path {...common} d="M4 16 C8 8 16 8 20 16" opacity="0.35" />
+          <path {...common} d="M4 12h16" />
+          <circle cx="4" cy="12" r="1.7" fill="currentColor" stroke="none" />
+          <circle cx="20" cy="12" r="1.7" fill="currentColor" stroke="none" />
+        </>
+      )}
+      {name === "fillet" && <path {...common} d="M4 20V10 Q4 4 10 4h10M4 20h0" strokeDasharray="0" />}
+      {name === "chamfer" && <path {...common} d="M4 20V11l7-7h9" />}
+      {name === "despike" && (
+        <>
+          <path {...common} d="M4 16l4-2 2-9 2 9 8-2" opacity="0.35" />
+          <path {...common} d="M4 16l6-2 10-2" />
+        </>
+      )}
+      {name === "resample" && (
+        <>
+          <path {...common} d="M4 12h16" />
+          {[4, 9.33, 14.66, 20].map((x) => (
+            <circle key={x} cx={x} cy="12" r="1.6" fill="currentColor" stroke="none" />
+          ))}
+        </>
+      )}
+      {name === "mirrorX" && (
+        <>
+          <path {...common} d="M12 3v18" strokeDasharray="3 3" />
+          <path {...common} d="M8 8 4 12l4 4M16 8l4 4-4 4" />
+        </>
+      )}
+      {name === "mirrorY" && (
+        <>
+          <path {...common} d="M3 12h18" strokeDasharray="3 3" />
+          <path {...common} d="M8 8l4-4 4 4M8 16l4 4 4-4" />
+        </>
+      )}
+      {name === "align" && (
+        <>
+          <path {...common} d="M4 19h16" />
+          <rect {...common} x="7" y="9" width="10" height="7" transform="rotate(-8 12 12)" />
+        </>
+      )}
+      {name === "scale" && (
+        <>
+          <rect {...common} x="4" y="10" width="10" height="10" rx="1" />
+          <path {...common} d="M14 10V4h6v6M14 10l6-6" />
+        </>
+      )}
+      {name === "offset" && (
+        <>
+          <rect {...common} x="8" y="8" width="8" height="8" rx="1" />
+          <rect {...common} x="4" y="4" width="16" height="16" rx="2" strokeDasharray="3 3" />
+        </>
+      )}
     </svg>
   );
 }

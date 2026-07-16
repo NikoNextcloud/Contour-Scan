@@ -305,3 +305,215 @@ export function nearestSegment(pts: Pt[], p: Pt): { index: number; dist: number 
   }
   return best;
 }
+
+/* ------------------------- contour repair toolkit ------------------------- */
+
+/** Local smoothing: moving-average applied only to the given indices (closed polygon). */
+export function smoothIndices(pts: Pt[], indices: Set<number>, strength = 0.5): Pt[] {
+  const n = pts.length;
+  if (n < 3) return pts;
+  return pts.map((p, i) => {
+    if (!indices.has(i)) return p;
+    const prev = pts[(i - 1 + n) % n];
+    const next = pts[(i + 1) % n];
+    const mx = (prev.x + next.x) / 2;
+    const my = (prev.y + next.y) / 2;
+    return { x: p.x + (mx - p.x) * strength, y: p.y + (my - p.y) * strength };
+  });
+}
+
+/**
+ * Straighten: project every selected point between the first and last selected
+ * index onto the straight chord connecting them. Fixes wobbly edges.
+ */
+export function straighten(pts: Pt[], indices: number[]): Pt[] {
+  if (indices.length < 3) return pts;
+  const sorted = [...indices].sort((a, b) => a - b);
+  const a = pts[sorted[0]];
+  const b = pts[sorted[sorted.length - 1]];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy || 1;
+  const idx = new Set(sorted.slice(1, -1));
+  return pts.map((p, i) => {
+    if (!idx.has(i)) return p;
+    const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+    return { x: a.x + t * dx, y: a.y + t * dy };
+  });
+}
+
+/** Round one corner with an arc of radius r. Returns a new point array. */
+export function filletCorner(pts: Pt[], i: number, r: number): Pt[] {
+  const n = pts.length;
+  if (n < 3 || r <= 0) return pts;
+  const A = pts[(i - 1 + n) % n];
+  const B = pts[i];
+  const C = pts[(i + 1) % n];
+  const v1 = { x: A.x - B.x, y: A.y - B.y };
+  const v2 = { x: C.x - B.x, y: C.y - B.y };
+  const l1 = Math.hypot(v1.x, v1.y);
+  const l2 = Math.hypot(v2.x, v2.y);
+  if (l1 < 1e-6 || l2 < 1e-6) return pts;
+  const u1 = { x: v1.x / l1, y: v1.y / l1 };
+  const u2 = { x: v2.x / l2, y: v2.y / l2 };
+  const dot = Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y));
+  const theta = Math.acos(dot); // corner angle
+  if (theta < 0.05 || theta > Math.PI - 0.05) return pts; // (almost) straight or degenerate
+  // Tangent length from the corner, clamped so we never eat a whole edge.
+  let t = r / Math.tan(theta / 2);
+  const tMax = 0.45 * Math.min(l1, l2);
+  if (t > tMax) {
+    t = tMax;
+    r = t * Math.tan(theta / 2);
+  }
+  const P1 = { x: B.x + u1.x * t, y: B.y + u1.y * t }; // tangent point on BA
+  const P2 = { x: B.x + u2.x * t, y: B.y + u2.y * t }; // tangent point on BC
+  // Arc centre lies along the angle bisector.
+  const bis = { x: u1.x + u2.x, y: u1.y + u2.y };
+  const bl = Math.hypot(bis.x, bis.y) || 1;
+  const d = r / Math.sin(theta / 2);
+  const O = { x: B.x + (bis.x / bl) * d, y: B.y + (bis.y / bl) * d };
+  // Sweep the arc from P1 to P2 around O.
+  const a1 = Math.atan2(P1.y - O.y, P1.x - O.x);
+  const a2 = Math.atan2(P2.y - O.y, P2.x - O.x);
+  let sweep = a2 - a1;
+  while (sweep > Math.PI) sweep -= 2 * Math.PI;
+  while (sweep < -Math.PI) sweep += 2 * Math.PI;
+  const steps = Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 18))); // ~10° per step
+  const arc: Pt[] = [];
+  for (let s = 0; s <= steps; s++) {
+    const a = a1 + (sweep * s) / steps;
+    arc.push({ x: O.x + Math.cos(a) * r, y: O.y + Math.sin(a) * r });
+  }
+  const out = [...pts];
+  out.splice(i, 1, ...arc);
+  return out;
+}
+
+/** Chamfer: cut the corner with a straight edge at distance d along both sides. */
+export function chamferCorner(pts: Pt[], i: number, d: number): Pt[] {
+  const n = pts.length;
+  if (n < 3 || d <= 0) return pts;
+  const A = pts[(i - 1 + n) % n];
+  const B = pts[i];
+  const C = pts[(i + 1) % n];
+  const l1 = Math.hypot(A.x - B.x, A.y - B.y);
+  const l2 = Math.hypot(C.x - B.x, C.y - B.y);
+  if (l1 < 1e-6 || l2 < 1e-6) return pts;
+  const t1 = Math.min(d, 0.45 * l1);
+  const t2 = Math.min(d, 0.45 * l2);
+  const P1 = { x: B.x + ((A.x - B.x) / l1) * t1, y: B.y + ((A.y - B.y) / l1) * t1 };
+  const P2 = { x: B.x + ((C.x - B.x) / l2) * t2, y: B.y + ((C.y - B.y) / l2) * t2 };
+  const out = [...pts];
+  out.splice(i, 1, P1, P2);
+  return out;
+}
+
+/**
+ * Remove needle-like spikes: points whose corner angle is sharper than
+ * minAngleDeg. Runs several passes until stable. Great for scan artefacts.
+ */
+export function despike(pts: Pt[], minAngleDeg = 25): Pt[] {
+  let cur = pts;
+  const minAngle = (minAngleDeg * Math.PI) / 180;
+  for (let pass = 0; pass < 5; pass++) {
+    const n = cur.length;
+    if (n <= 4) break;
+    const keep: Pt[] = [];
+    let removed = 0;
+    for (let i = 0; i < n; i++) {
+      const A = cur[(i - 1 + n) % n];
+      const B = cur[i];
+      const C = cur[(i + 1) % n];
+      const v1 = { x: A.x - B.x, y: A.y - B.y };
+      const v2 = { x: C.x - B.x, y: C.y - B.y };
+      const l1 = Math.hypot(v1.x, v1.y) || 1;
+      const l2 = Math.hypot(v2.x, v2.y) || 1;
+      const dot = Math.max(-1, Math.min(1, (v1.x * v2.x + v1.y * v2.y) / (l1 * l2)));
+      const angle = Math.acos(dot);
+      if (angle < minAngle && n - removed > 4) {
+        removed++;
+        continue; // spike — drop the point
+      }
+      keep.push(B);
+    }
+    if (!removed) break;
+    cur = keep;
+  }
+  return cur;
+}
+
+/** Resample a closed polygon with (approximately) equal spacing between points. */
+export function resampleClosed(pts: Pt[], spacing: number): Pt[] {
+  const n = pts.length;
+  if (n < 3 || spacing <= 0) return pts;
+  const total = polygonPerimeter(pts);
+  const count = Math.max(8, Math.round(total / spacing));
+  const step = total / count;
+  const out: Pt[] = [];
+  let acc = 0; // distance travelled since last emitted point
+  let need = 0; // next emission distance
+  out.push({ ...pts[0] });
+  need = step;
+  let travelled = 0;
+  for (let i = 0; i < n && out.length < count; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % n];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+    while (travelled + segLen >= need && out.length < count) {
+      const t = (need - travelled) / segLen;
+      out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+      need += step;
+    }
+    travelled += segLen;
+    acc = travelled;
+  }
+  void acc;
+  return out;
+}
+
+/**
+ * Offset (inflate/deflate) a closed polygon by delta using mitred vertex
+ * normals. Positive delta always grows the shape. Used for kerf compensation.
+ */
+export function offsetPolygon(pts: Pt[], delta: number): Pt[] {
+  const n = pts.length;
+  if (n < 3 || delta === 0) return pts;
+  const offsetWith = (sign: number): Pt[] =>
+    pts.map((B, i) => {
+      const A = pts[(i - 1 + n) % n];
+      const C = pts[(i + 1) % n];
+      // Edge normals (rotated segment directions).
+      const e1 = { x: B.x - A.x, y: B.y - A.y };
+      const e2 = { x: C.x - B.x, y: C.y - B.y };
+      const l1 = Math.hypot(e1.x, e1.y) || 1;
+      const l2 = Math.hypot(e2.x, e2.y) || 1;
+      const n1 = { x: e1.y / l1, y: -e1.x / l1 };
+      const n2 = { x: e2.y / l2, y: -e2.x / l2 };
+      let mx = n1.x + n2.x;
+      let my = n1.y + n2.y;
+      const ml = Math.hypot(mx, my);
+      if (ml < 1e-6) {
+        mx = n1.x;
+        my = n1.y;
+      } else {
+        mx /= ml;
+        my /= ml;
+      }
+      // Miter scale, clamped to avoid explosions on sharp corners.
+      const cosHalf = Math.max(0.25, (mx * n1.x + my * n1.y) || 1);
+      const dist = (delta * sign) / cosHalf;
+      return { x: B.x + mx * dist, y: B.y + my * dist };
+    });
+  // Orientation-agnostic: pick the sign that actually grows the polygon.
+  const grown = offsetWith(1);
+  return polygonArea(grown) >= polygonArea(pts) === delta > 0 ? grown : offsetWith(-1);
+}
+
+/** Uniform scale around a centre point. */
+export function scaleAround(pts: Pt[], center: Pt, factor: number): Pt[] {
+  return pts.map((p) => ({
+    x: center.x + (p.x - center.x) * factor,
+    y: center.y + (p.y - center.y) * factor,
+  }));
+}
