@@ -14,6 +14,7 @@ import {
   minAreaRect,
   nearestSegment,
   offsetPolygon,
+  pointInPolygon,
   pointToSegment,
   polygonArea,
   resampleClosed,
@@ -903,6 +904,31 @@ export default function EditorPage() {
       pushUndo();
       dragRef.current = { kind: "drag-selected", last: p, selection: sel };
     } else {
+      // Ако вече има селекция: хващане върху линията или ВЪТРЕ в изцяло
+      // избрана фигура мести цялата селекция свободно.
+      if (selectedPoints.size) {
+        const grabTol = 12 / view.scale;
+        let grab = false;
+        for (let ci = 0; ci < polys.length; ci++) {
+          const fully =
+            polys[ci].length > 0 &&
+            polys[ci].every((_, pi) => selectedPoints.has(pointKey(ci, pi)));
+          if (!fully) continue;
+          if (
+            nearestSegment(polys[ci], p).dist <= grabTol ||
+            pointInPolygon(p, polys[ci])
+          ) {
+            grab = true;
+            break;
+          }
+        }
+        if (grab) {
+          pushUndo();
+          dragRef.current = { kind: "drag-selected", last: p, selection: new Set(selectedPoints) };
+          return;
+        }
+      }
+
       // Клик върху линията на фигура (без точка): избира ЦЯЛАТА фигура (оцветява се в синьо).
       let segHit = { ci: -1, dist: Infinity };
       polys.forEach((poly, ci) => {
@@ -1348,7 +1374,7 @@ export default function EditorPage() {
             />
           </div>
           <p className="mt-2 text-xs text-ink/50 dark:text-paper/50">
-            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
+            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. При изцяло избрана фигура: хвани я откъдето и да е (вкл. отвътре) и я влачи свободно. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
           </p>
         </div>
 

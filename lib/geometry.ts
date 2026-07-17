@@ -517,3 +517,16 @@ export function scaleAround(pts: Pt[], center: Pt, factor: number): Pt[] {
     y: center.y + (p.y - center.y) * factor,
   }));
 }
+
+/** Ray-casting point-in-polygon test. */
+export function pointInPolygon(p: Pt, pts: Pt[]): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i];
+    const b = pts[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
