@@ -313,9 +313,8 @@ export default function ScannerPage() {
   const makeRecord = useCallback((): ScanRecord | null => {
     const img = imageRef.current;
     if (!img || !contours || !measurements) return null;
-    // Mid-res JPEG doubles as history thumbnail and editor underlay.
-    const maxSide = 1000;
-    const s = Math.min(1, maxSide / Math.max(img.canvas.width, img.canvas.height));
+    // Keep the editor underlay at the full scan size so the template stays visually 1:1.
+    const s = 1;
     const tc = document.createElement("canvas");
     tc.width = Math.round(img.canvas.width * s);
     tc.height = Math.round(img.canvas.height * s);
@@ -324,7 +323,7 @@ export default function ScannerPage() {
       id: newId(),
       name: `scan-${new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "")}`,
       createdAt: Date.now(),
-      thumbnail: tc.toDataURL("image/jpeg", 0.75),
+      thumbnail: tc.toDataURL("image/jpeg", 0.92),
       contours,
       measurements,
       calibration,

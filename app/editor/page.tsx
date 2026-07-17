@@ -119,6 +119,16 @@ const arcFrom3Points = (a: Pt, b: Pt, c: Pt, steps = 48): Pt[] => {
   });
 };
 
+const bezierFrom3Points = (a: Pt, b: Pt, c: Pt, steps = 32): Pt[] =>
+  Array.from({ length: steps + 1 }, (_, i) => {
+    const t = i / steps;
+    const u = 1 - t;
+    return {
+      x: u * u * a.x + 2 * u * t * b.x + t * t * c.x,
+      y: u * u * a.y + 2 * u * t * b.y + t * t * c.y,
+    };
+  });
+
 const mapContourSet = (c: ContourSet, fn: (p: Pt) => Pt): ContourSet => ({
   outer: c.outer.map(fn),
   inner: c.inner.map((poly) => poly.map(fn)),
@@ -474,6 +484,15 @@ export default function EditorPage() {
         ctx.fill();
         ctx.stroke();
       }
+      for (let pi = 0; pi < pts.length; pi++) {
+        const a = pts[pi];
+        const b = pts[(pi + 1) % pts.length];
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        ctx.beginPath();
+        ctx.arc(mid.x, mid.y, 2.2 / view.scale, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(17,24,39,0.28)";
+        ctx.fill();
+      }
     });
 
     const drawOpen = (pts: Pt[], color: string) => {
@@ -489,6 +508,14 @@ export default function EditorPage() {
         ctx.fillStyle = "#ffffff";
         ctx.fill();
         ctx.stroke();
+      }
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        ctx.beginPath();
+        ctx.arc((a.x + b.x) / 2, (a.y + b.y) / 2, 2.2 / view.scale, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(17,24,39,0.28)";
+        ctx.fill();
       }
     };
 
@@ -1008,6 +1035,46 @@ export default function EditorPage() {
     setOpenLines(openLines.map((l, i) => (i === li ? [...l].reverse() : l)));
   };
 
+  const joinOpenLines = (mode: "line" | "arc") => {
+    if (openLines.length < 2) return toast("Нужни са поне две отворени линии", "err");
+    type End = { li: number; end: "start" | "end"; p: Pt };
+    const ends: End[] = openLines.flatMap((line, li) => [
+      { li, end: "start" as const, p: line[0] },
+      { li, end: "end" as const, p: line[line.length - 1] },
+    ]);
+    let best: { a: End; b: End; dist: number } | null = null;
+    for (let i = 0; i < ends.length; i++) {
+      for (let j = i + 1; j < ends.length; j++) {
+        if (ends[i].li === ends[j].li) continue;
+        const dist = Math.hypot(ends[i].p.x - ends[j].p.x, ends[i].p.y - ends[j].p.y);
+        if (!best || dist < best.dist) best = { a: ends[i], b: ends[j], dist };
+      }
+    }
+    if (!best) return;
+    const orient = (line: Pt[], end: "start" | "end", first: boolean) => {
+      if (first) return end === "end" ? line : [...line].reverse();
+      return end === "start" ? line : [...line].reverse();
+    };
+    const aLine = orient(openLines[best.a.li], best.a.end, true);
+    const bLine = orient(openLines[best.b.li], best.b.end, false);
+    const p1 = aLine[aLine.length - 1];
+    const p2 = bLine[0];
+    let bridge: Pt[] = [];
+    if (mode === "arc") {
+      const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const control = { x: mid.x - (dy / len) * len * 0.25, y: mid.y + (dx / len) * len * 0.25 };
+      bridge = arcFrom3Points(p1, control, p2, 18).slice(1, -1);
+    }
+    const joined = [...aLine, ...bridge, ...bLine];
+    pushUndo();
+    setOpenLines(openLines.filter((_, i) => i !== best!.a.li && i !== best!.b.li).concat([joined]));
+    setSelectedLine(openLines.length - 2);
+    toast(mode === "arc" ? "Линиите са join-нати с арка" : "Линиите са join-нати с права линия");
+  };
+
   /**
    * Смяна на инструмента. Ако оставяш Полилиния с начертана чернова,
    * тя се завършва автоматично — така "чертая → ножица → режа" работи направо.
@@ -1353,6 +1420,17 @@ export default function EditorPage() {
 
   const onContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    if (tool === "polyline") {
+      if (polyDraft.length >= 3) {
+        pushUndo();
+        setContours((cur) => cur && { ...cur, inner: [...cur.inner, polyDraft] });
+        setPolyDraft([]);
+        toast("Полилинията е затворена автоматично");
+      } else if (polyDraft.length >= 2) {
+        finishPolyline();
+      }
+      return;
+    }
     const p = toImage(e);
     const lp = hitLinePoint(p);
     if (lp) {
@@ -1782,6 +1860,13 @@ export default function EditorPage() {
                   <ActionButton icon="trash" label="Изтрий целия контур (дупка/фигура)" danger wide disabled={!selectedCount} onClick={deleteWholeContour} />
                 </div>
               </Section>
+
+              <Section title="Join отворени линии" hint="Свързва най-близките две отворени крайни точки">
+                <div className="grid grid-cols-2 gap-2">
+                  <ActionButton icon="polyline" label="Затвори с полилайн" disabled={openLines.length < 2} onClick={() => joinOpenLines("line")} />
+                  <ActionButton icon="arc" label="Затвори с арка" disabled={openLines.length < 2} onClick={() => joinOpenLines("arc")} />
+                </div>
+              </Section>
             </div>
           )}
 
@@ -1910,6 +1995,28 @@ export default function EditorPage() {
           style={{ left: nodeMenu.x, top: nodeMenu.y }}
         >
           <MenuItem label="to Line" hotkey="L" onClick={() => setNodeMenu(null)} />
+          <MenuItem label="to Bezier" hotkey="B" onClick={() => {
+            const target = nodeMenu.target;
+            pushUndo();
+            if (target.type === "line") {
+              const line = openLines[target.li];
+              if (line && target.pi > 0 && target.pi < line.length - 1) {
+                const bez = bezierFrom3Points(line[target.pi - 1], line[target.pi], line[target.pi + 1], 18);
+                setOpenLines(openLines.map((l, i) => i === target.li ? [...l.slice(0, target.pi - 1), ...bez, ...l.slice(target.pi + 2)] : l));
+              }
+            } else {
+              const poly = polys[target.ci];
+              if (poly && poly.length > 3) {
+                const prev = (target.pi - 1 + poly.length) % poly.length;
+                const next = (target.pi + 1) % poly.length;
+                const bez = bezierFrom3Points(poly[prev], poly[target.pi], poly[next], 18);
+                const out = [...poly];
+                out.splice(Math.min(prev, target.pi), 3, ...bez);
+                setPolys(polys.map((p, i) => i === target.ci ? out : p));
+              }
+            }
+            setNodeMenu(null);
+          }} />
           <MenuItem label="to Arc" hotkey="A" onClick={() => {
             const target = nodeMenu.target;
             if (target.type === "line") {
