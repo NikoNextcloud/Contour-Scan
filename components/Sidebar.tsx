@@ -39,7 +39,6 @@ export default function Sidebar() {
   const pathname = usePathname();
 
   const items = [
-    { href: "/", label: t.navHome, icon: "home" },
     { href: "/scanner", label: t.navScanner, icon: "scanner" },
     { href: "/editor", label: t.navEditor, icon: "editor" },
     { href: "/history", label: t.navHistory, icon: "history" },
@@ -50,7 +49,7 @@ export default function Sidebar() {
   return (
     <aside className="sticky top-0 z-40 flex shrink-0 flex-row items-center gap-1 border-b border-paper-3 bg-paper-2/90 px-2 py-2 backdrop-blur dark:border-ink-3 dark:bg-ink-2/90 md:h-screen md:w-56 md:flex-col md:items-stretch md:gap-0 md:border-b-0 md:border-r md:px-0 md:py-0">
       {/* Wordmark + ruler ticks: the app's visual signature */}
-      <Link href="/" className="hidden items-baseline gap-2 px-5 pb-2 pt-6 md:flex">
+      <Link href="/scanner" className="hidden items-baseline gap-2 px-5 pb-2 pt-6 md:flex">
         <span className="font-display text-lg font-bold tracking-tight">
           Contour<span className="text-dye dark:text-dye-bright">Scan</span>
         </span>

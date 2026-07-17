@@ -41,12 +41,15 @@ type ToolMode =
   | "circle"
   | "triangle"
   | "square"
-  | "polyline";
+  | "polyline"
+  | "image";
 
 type DragState =
   | { kind: "drag-selected"; last: Pt; selection: Set<string> }
   | { kind: "marquee"; additive: boolean }
   | { kind: "move-all"; start: Pt; contours: ContourSet }
+  | { kind: "draw-shape"; shape: "circle" | "triangle" | "square"; start: Pt }
+  | { kind: "image-move"; start: Pt; startOff: { x: number; y: number } }
   | { kind: "pan"; startX: number; startY: number; startTx: number; startTy: number }
   | null;
 
@@ -130,6 +133,11 @@ export default function EditorPage() {
   const [marquee, setMarquee] = useState<{ a: Pt; b: Pt } | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [panelTab, setPanelTab] = useState<"tool" | "repair" | "transform" | "data">("tool");
+  // Призрачна фигура при чертане с влачене
+  const [ghost, setGhost] = useState<{ shape: "circle" | "triangle" | "square"; start: Pt; cur: Pt } | null>(null);
+  // Свободно местене/въртене на подложната снимка (само визуално, в редактора)
+  const [imgOffset, setImgOffset] = useState({ x: 0, y: 0 });
+  const [imgRotation, setImgRotation] = useState(0);
 
   useEffect(() => {
     const rec = getCurrent();
@@ -300,9 +308,15 @@ export default function EditorPage() {
     ctx.scale(view.scale, view.scale);
 
     if (imgRef.current) {
+      // Подложната снимка може да се мести и върти свободно (инструмент "Снимка").
+      const cw = record.imageSize.w;
+      const chh = record.imageSize.h;
+      ctx.save();
       ctx.globalAlpha = 0.42;
-      ctx.drawImage(imgRef.current, 0, 0, record.imageSize.w, record.imageSize.h);
-      ctx.globalAlpha = 1;
+      ctx.translate(cw / 2 + imgOffset.x, chh / 2 + imgOffset.y);
+      ctx.rotate((imgRotation * Math.PI) / 180);
+      ctx.drawImage(imgRef.current, -cw / 2, -chh / 2, cw, chh);
+      ctx.restore();
     }
 
     if (grid) {
@@ -321,12 +335,22 @@ export default function EditorPage() {
     }
 
     polys.forEach((pts, ci) => {
-      const color = ci === 0 ? "#2563eb" : "#dc2626";
+      const wholeSelected =
+        pts.length > 0 && pts.every((_, pi) => selectedPoints.has(pointKey(ci, pi)));
+      const color = wholeSelected ? "#2563eb" : ci === 0 ? "#2563eb" : "#dc2626";
       ctx.beginPath();
       pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
       ctx.closePath();
+      // Фигурите (не външният контур) са "сенчести"; избраните светят в синьо.
+      if (ci !== 0) {
+        ctx.fillStyle = wholeSelected ? "rgba(37,99,235,0.18)" : "rgba(120,134,150,0.14)";
+        ctx.fill();
+      } else if (wholeSelected) {
+        ctx.fillStyle = "rgba(37,99,235,0.08)";
+        ctx.fill();
+      }
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2.2 / view.scale;
+      ctx.lineWidth = (wholeSelected ? 3 : 2.2) / view.scale;
       ctx.stroke();
 
       const r = 4.5 / view.scale;
@@ -377,6 +401,21 @@ export default function EditorPage() {
       ctx.setLineDash([]);
     }
 
+    // Призрачна фигура при чертане с влачене
+    if (ghost) {
+      const pts = shapeFromDrag(ghost.shape, ghost.start, ghost.cur);
+      ctx.beginPath();
+      pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.closePath();
+      ctx.fillStyle = "rgba(37,99,235,0.10)";
+      ctx.fill();
+      ctx.strokeStyle = "#4c8dff";
+      ctx.lineWidth = 2 / view.scale;
+      ctx.setLineDash([7 / view.scale, 5 / view.scale]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     if (tool === "rotate") {
       const center = pivot ?? (contours ? contourCenter(contours) : null);
       if (center) {
@@ -392,7 +431,7 @@ export default function EditorPage() {
         ctx.stroke();
       }
     }
-  }, [record, contours, polys, openLines, polyDraft, selectedPoints, marquee, view, grid, gridStep, tool, pivot]);
+  }, [record, contours, polys, openLines, polyDraft, selectedPoints, marquee, ghost, imgOffset, imgRotation, view, grid, gridStep, tool, pivot]);
 
   useEffect(() => {
     redraw();
@@ -406,25 +445,51 @@ export default function EditorPage() {
   const deleteSelectedPoints = () => {
     if (!selectedPoints.size) return;
     pushUndo();
-    const next = polys.map((poly, ci) => {
+    // Ако ЦЯЛА фигура (дупка/фигура, не външният контур) е избрана — трие се изцяло.
+    const fullySelected = new Set<number>();
+    polys.forEach((poly, ci) => {
+      if (ci !== 0 && poly.every((_, pi) => selectedPoints.has(pointKey(ci, pi))))
+        fullySelected.add(ci);
+    });
+    const kept = polys.filter((_, ci) => !fullySelected.has(ci));
+    const keptIdx = polys.map((_, ci) => ci).filter((ci) => !fullySelected.has(ci));
+    const next = kept.map((poly, k) => {
+      const ci = keptIdx[k];
       const filtered = poly.filter((_, pi) => !selectedPoints.has(pointKey(ci, pi)));
       return filtered.length >= 3 ? filtered : poly;
     });
     setPolys(next);
     setSelectedPoints(new Set());
+    if (fullySelected.size) toast("Фигурата е изтрита");
   };
   const deleteSelectedRef = useRef(deleteSelectedPoints);
   deleteSelectedRef.current = deleteSelectedPoints;
 
-  // Delete / Backspace изтрива избраните точки (освен когато пишеш в поле).
+  // Клавишни комбинации: Del/Backspace, Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z, Esc, F.
+  const undoRef = useRef<() => void>(() => {});
+  const redoRef = useRef<() => void>(() => {});
+  const escRef = useRef<() => void>(() => {});
+  const fitRef = useRef<() => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Delete" && e.key !== "Backspace") return;
       const el = document.activeElement;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT"))
         return;
-      e.preventDefault();
-      deleteSelectedRef.current();
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && (e.key === "z" || e.key === "Z") && !e.shiftKey) {
+        e.preventDefault();
+        undoRef.current();
+      } else if ((mod && (e.key === "y" || e.key === "Y")) || (mod && e.shiftKey && (e.key === "z" || e.key === "Z"))) {
+        e.preventDefault();
+        redoRef.current();
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        deleteSelectedRef.current();
+      } else if (e.key === "Escape") {
+        escRef.current();
+      } else if (!mod && (e.key === "f" || e.key === "F")) {
+        fitRef.current();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -473,37 +538,93 @@ export default function EditorPage() {
     const n = contour.length;
     const attachTol = 30 / view.scale;
 
-    // Най-подходящата линия: и двата ѝ края са близо до този контур.
-    let bestLine = -1;
-    let bestScore = Infinity;
-    let attA: ReturnType<typeof nearestOnContour> | null = null;
-    let attB: ReturnType<typeof nearestOnContour> | null = null;
-    openLines.forEach((line, li) => {
-      if (line.length < 2) return;
-      const a = nearestOnContour(contour, line[0]);
-      const b = nearestOnContour(contour, line[line.length - 1]);
-      if (a.dist <= attachTol && b.dist <= attachTol && a.dist + b.dist < bestScore) {
-        bestScore = a.dist + b.dist;
-        bestLine = li;
-        attA = a;
-        attB = b;
-      }
-    });
-    if (bestLine === -1 || !attA || !attB) return false;
+    /** Пресичане на отсечки p1→p2 и p3→p4; връща параметрите и точката. */
+    const segIntersect = (p1: Pt, p2: Pt, p3: Pt, p4: Pt) => {
+      const d1x = p2.x - p1.x;
+      const d1y = p2.y - p1.y;
+      const d2x = p4.x - p3.x;
+      const d2y = p4.y - p3.y;
+      const den = d1x * d2y - d1y * d2x;
+      if (Math.abs(den) < 1e-12) return null;
+      const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / den;
+      const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / den;
+      if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+      return { t, u, pt: { x: p1.x + t * d1x, y: p1.y + t * d1y } };
+    };
 
-    const line = openLines[bestLine];
-    const posA = (attA as { index: number; t: number }).index + (attA as { t: number }).t;
-    const posB = (attB as { index: number; t: number }).index + (attB as { t: number }).t;
+    // Вариант А: линията ПРЕСИЧА контура (като зелената права през фигурата).
+    // Взимаме първото и последното пресичане по дължината на линията.
+    type Hit = { linePos: number; contourPos: number; pt: Pt };
+    let chosen: { li: number; first: Hit; last: Hit } | null = null;
+    for (let li = 0; li < openLines.length; li++) {
+      const line = openLines[li];
+      const hits: Hit[] = [];
+      for (let j = 0; j < line.length - 1; j++) {
+        for (let i = 0; i < n; i++) {
+          const hit = segIntersect(line[j], line[j + 1], contour[i], contour[(i + 1) % n]);
+          if (hit) hits.push({ linePos: j + hit.t, contourPos: i + hit.u, pt: hit.pt });
+        }
+      }
+      if (hits.length >= 2) {
+        hits.sort((a, b) => a.linePos - b.linePos);
+        chosen = { li, first: hits[0], last: hits[hits.length - 1] };
+        break;
+      }
+    }
+
+    let bestLine = -1;
+    let posA = 0;
+    let posB = 0;
+    let bridge: Pt[] = [];
+    let ptA: Pt | null = null;
+
+    if (chosen) {
+      const line = openLines[chosen.li];
+      bestLine = chosen.li;
+      posA = chosen.first.contourPos;
+      posB = chosen.last.contourPos;
+      ptA = chosen.first.pt;
+      // Мостът е частта от линията МЕЖДУ двете пресичания.
+      bridge = [chosen.first.pt];
+      for (let j = Math.floor(chosen.first.linePos) + 1; j <= Math.floor(chosen.last.linePos); j++) {
+        if (j > chosen.first.linePos && j < chosen.last.linePos) bridge.push(line[j]);
+      }
+      bridge.push(chosen.last.pt);
+    } else {
+      // Вариант Б (както досега): краищата на линията лежат върху контура.
+      let bestScore = Infinity;
+      let attA: { index: number; t: number; dist: number; point: Pt } | null = null;
+      let attB: { index: number; t: number; dist: number; point: Pt } | null = null;
+      openLines.forEach((line, li) => {
+        if (line.length < 2) return;
+        const a = nearestOnContour(contour, line[0]);
+        const b = nearestOnContour(contour, line[line.length - 1]);
+        if (a.dist <= attachTol && b.dist <= attachTol && a.dist + b.dist < bestScore) {
+          bestScore = a.dist + b.dist;
+          bestLine = li;
+          attA = a;
+          attB = b;
+        }
+      });
+      if (bestLine === -1 || !attA || !attB) return false;
+      const a = attA as { index: number; t: number; point: Pt };
+      const b = attB as { index: number; t: number; point: Pt };
+      posA = a.index + a.t;
+      posB = b.index + b.t;
+      ptA = a.point;
+      bridge = [...openLines[bestLine]];
+    }
+
     const click = nearestOnContour(contour, clickP);
     const posClick = click.index + click.t;
     const span = (posB - posA + n) % n;
-    if (span < 1e-6 || span > n - 1e-6) return false; // краищата съвпадат
+    if (span < 1e-6 || span > n - 1e-6) return false;
 
     // В коя дъга е кликът: A→B (напред) или B→A?
     const relClick = (posClick - posA + n) % n;
     const clickInAB = relClick > 0 && relClick < span;
 
-    // Запазваме дъгата БЕЗ клика; линията замества изрязаната дъга.
+    // Запазваме дъгата БЕЗ клика; мостът замества изрязаната дъга.
     const keptFrom = clickInAB ? posB : posA;
     const keptTo = clickInAB ? posA : posB;
     const keptSpan = (keptTo - keptFrom + n) % n;
@@ -518,18 +639,16 @@ export default function EditorPage() {
       arc.push(contour[idx]);
     }
 
-    // Ориентираме линията така, че да започва от края на запазената дъга.
-    const keptEndPt = clickInAB
-      ? (attA as { point: Pt }).point
-      : (attB as { point: Pt }).point;
-    const dStart = Math.hypot(line[0].x - keptEndPt.x, line[0].y - keptEndPt.y);
+    // Ориентираме моста така, че да започва от края на запазената дъга (A или B).
+    const keptEndPt = clickInAB ? (ptA as Pt) : bridge[bridge.length - 1];
+    const dStart = Math.hypot(bridge[0].x - keptEndPt.x, bridge[0].y - keptEndPt.y);
     const dEnd = Math.hypot(
-      line[line.length - 1].x - keptEndPt.x,
-      line[line.length - 1].y - keptEndPt.y
+      bridge[bridge.length - 1].x - keptEndPt.x,
+      bridge[bridge.length - 1].y - keptEndPt.y
     );
-    const bridge = dStart <= dEnd ? line : [...line].reverse();
+    const orientedBridge = dStart <= dEnd ? bridge : [...bridge].reverse();
 
-    const newContour = [...arc, ...bridge];
+    const newContour = [...arc, ...orientedBridge];
     if (newContour.length < 3) return false;
 
     pushUndo();
@@ -540,7 +659,7 @@ export default function EditorPage() {
       polylines: openLines.filter((_, i) => i !== bestLine),
     });
     setSelectedPoints(new Set());
-    toast("Участъкът е заменен с начертаната линия");
+    toast("Кликнатата страна е изрязана — линията стана част от контура");
     return true;
   };
 
@@ -632,6 +751,41 @@ export default function EditorPage() {
     setContours((cur) => cur && { ...cur, inner: [...cur.inner, pts] });
   };
 
+  /** Фигура, разпъната с влачене: от начална до крайна точка. */
+  const shapeFromDrag = (shape: "circle" | "triangle" | "square", a: Pt, b: Pt): Pt[] => {
+    if (shape === "circle") {
+      const r = Math.hypot(b.x - a.x, b.y - a.y);
+      return Array.from({ length: 72 }, (_, i) => {
+        const ang = (i / 72) * Math.PI * 2;
+        return { x: a.x + Math.cos(ang) * r, y: a.y + Math.sin(ang) * r };
+      });
+    }
+    const minX = Math.min(a.x, b.x);
+    const maxX = Math.max(a.x, b.x);
+    const minY = Math.min(a.y, b.y);
+    const maxY = Math.max(a.y, b.y);
+    if (shape === "square") {
+      return [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY },
+      ];
+    }
+    // Триъгълник: върхът горе в средата, основата долу.
+    return [
+      { x: (minX + maxX) / 2, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY },
+    ];
+  };
+
+  const commitDraggedShape = (shape: "circle" | "triangle" | "square", a: Pt, b: Pt) => {
+    const pts = shapeFromDrag(shape, a, b);
+    pushUndo();
+    setContours((cur) => cur && { ...cur, inner: [...cur.inner, pts] });
+  };
+
   const finishPolyline = () => {
     if (polyDraft.length < 2) return;
     pushUndo();
@@ -692,15 +846,43 @@ export default function EditorPage() {
       return;
     }
     if (tool === "circle" || tool === "triangle" || tool === "square") {
-      addShape(tool, snapPt(p));
+      // Влачене = свободно разпъване на фигурата (призрачен изглед).
+      dragRef.current = { kind: "draw-shape", shape: tool, start: snapPt(p) };
+      setGhost({ shape: tool, start: snapPt(p), cur: snapPt(p) });
       return;
     }
     if (tool === "polyline") {
       setPolyDraft((draft) => [...draft, snapPt(p)]);
       return;
     }
+    if (tool === "image") {
+      dragRef.current = { kind: "image-move", start: p, startOff: { ...imgOffset } };
+      return;
+    }
 
     // --- select tool ---
+    // Ctrl/Cmd + клик върху линия: добавя нова точка там.
+    if (e.ctrlKey || e.metaKey) {
+      let best = { ci: -1, index: 0, dist: Infinity };
+      polys.forEach((poly, ci) => {
+        const seg = nearestSegment(poly, p);
+        if (seg.dist < best.dist) best = { ci, ...seg };
+      });
+      if (best.ci !== -1 && best.dist <= 15 / view.scale) {
+        pushUndo();
+        const q = snapPt(p);
+        const nextP = polys.map((poly, ci) => {
+          if (ci !== best.ci) return poly;
+          const copy = [...poly];
+          copy.splice(best.index + 1, 0, q);
+          return copy;
+        });
+        setPolys(nextP);
+        setSelectedPoints(new Set([pointKey(best.ci, best.index + 1)]));
+        return;
+      }
+    }
+
     const hit = hitPoint(p);
     if (hit) {
       const key = pointKey(hit.ci, hit.pi);
@@ -721,6 +903,21 @@ export default function EditorPage() {
       pushUndo();
       dragRef.current = { kind: "drag-selected", last: p, selection: sel };
     } else {
+      // Клик върху линията на фигура (без точка): избира ЦЯЛАТА фигура (оцветява се в синьо).
+      let segHit = { ci: -1, dist: Infinity };
+      polys.forEach((poly, ci) => {
+        const seg = nearestSegment(poly, p);
+        if (seg.dist < segHit.dist) segHit = { ci, dist: seg.dist };
+      });
+      if (segHit.ci !== -1 && segHit.dist <= 10 / view.scale) {
+        const sel = e.shiftKey ? new Set(selectedPoints) : new Set<string>();
+        polys[segHit.ci].forEach((_, pi) => sel.add(pointKey(segHit.ci, pi)));
+        setSelectedPoints(sel);
+        // Влаченето мести цялата избрана фигура.
+        pushUndo();
+        dragRef.current = { kind: "drag-selected", last: p, selection: sel };
+        return;
+      }
       // Празно място: рисуваме правоъгълник за селекция (marquee).
       dragRef.current = { kind: "marquee", additive: e.shiftKey };
       setMarquee({ a: p, b: p });
@@ -742,6 +939,15 @@ export default function EditorPage() {
     } else if (drag.kind === "marquee") {
       const p = toImage(e);
       setMarquee((m) => (m ? { a: m.a, b: p } : m));
+    } else if (drag.kind === "draw-shape") {
+      const p = snapPt(toImage(e));
+      setGhost((g) => (g ? { ...g, cur: p } : g));
+    } else if (drag.kind === "image-move") {
+      const p = toImage(e);
+      setImgOffset({
+        x: drag.startOff.x + (p.x - drag.start.x),
+        y: drag.startOff.y + (p.y - drag.start.y),
+      });
     } else if (drag.kind === "drag-selected") {
       const p = toImage(e);
       if (drag.selection.size === 1) {
@@ -772,6 +978,22 @@ export default function EditorPage() {
 
   const onPointerUp = () => {
     const drag = dragRef.current;
+    if (drag?.kind === "draw-shape") {
+      setGhost((g) => {
+        if (g) {
+          const d = Math.hypot(g.cur.x - g.start.x, g.cur.y - g.start.y);
+          if (d >= 3 / view.scale) {
+            commitDraggedShape(g.shape, g.start, g.cur);
+          } else {
+            // Само клик без влачене: фигура с настроения диаметър.
+            addShape(g.shape, g.start);
+          }
+        }
+        return null;
+      });
+      dragRef.current = null;
+      return;
+    }
     if (drag?.kind === "marquee") {
       setMarquee((m) => {
         if (m) {
@@ -1039,6 +1261,16 @@ export default function EditorPage() {
     );
   }
 
+  // Актуализираме ref-овете за клавишните комбинации на всеки render.
+  undoRef.current = undo;
+  redoRef.current = redo;
+  escRef.current = () => {
+    setSelectedPoints(new Set());
+    setPolyDraft([]);
+    setGhost(null);
+  };
+  fitRef.current = () => fitView(record);
+
   const liveMeasurements = measure(contours);
   const liveRecord: ScanRecord = { ...record, contours, measurements: liveMeasurements };
   const shapeUnit = record.calibration ? "мм" : "px";
@@ -1081,6 +1313,7 @@ export default function EditorPage() {
             <IconTool active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => switchTool("triangle")} />
             <IconTool active={tool === "square"} icon="square" label="Квадрат" onClick={() => switchTool("square")} />
             <IconTool active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => switchTool("polyline")} />
+            <IconTool active={tool === "image"} icon="image" label="Снимка — мести/върти подложката" onClick={() => switchTool("image")} />
           </ToolGroup>
           <ToolGroup label="Стъпки">
             <IconTool icon="undo" label="Назад (Undo)" disabled={!undoStack.length} onClick={undo} />
@@ -1115,7 +1348,7 @@ export default function EditorPage() {
             />
           </div>
           <p className="mt-2 text-xs text-ink/50 dark:text-paper/50">
-            Влачене на празно място: правоъгълник за маркиране на много точки (Shift добавя). Влачене на избрана точка мести цялата селекция. Delete трие избраните. Двоен клик върху сегмент добавя точка. Десен бутон трие точка. Скрол: zoom. Среден бутон: местене на изгледа.
+            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
           </p>
         </div>
 
@@ -1154,6 +1387,12 @@ export default function EditorPage() {
                 onDeleteSelected={deleteSelectedPoints}
                 onFinishPolyline={finishPolyline}
                 onClearPolyline={() => setPolyDraft([])}
+                imgRotation={imgRotation}
+                onImgRotation={setImgRotation}
+                onImgReset={() => {
+                  setImgOffset({ x: 0, y: 0 });
+                  setImgRotation(0);
+                }}
               />
 
               <Section title="Селекция" hint={`Избрани точки: ${selectedCount}`}>
@@ -1352,6 +1591,9 @@ function ToolOptions({
   onDeleteSelected,
   onFinishPolyline,
   onClearPolyline,
+  imgRotation,
+  onImgRotation,
+  onImgReset,
 }: {
   tool: ToolMode;
   diameter: number;
@@ -1376,6 +1618,9 @@ function ToolOptions({
   onDeleteSelected: () => void;
   onFinishPolyline: () => void;
   onClearPolyline: () => void;
+  imgRotation: number;
+  onImgRotation: (v: number) => void;
+  onImgReset: () => void;
 }) {
   const radius = diameter / 2;
   return (
@@ -1500,7 +1745,37 @@ function ToolOptions({
       {tool === "delete" && <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху точка я изтрива веднага.</p>}
 
       {tool === "scissors" && (
-        <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай нова форма с Полилиния, като краищата ѝ лягат върху контура. 2) Кликни с Ножицата върху стария участък — той се маха и линията ти става част от контура. Клик върху линия без връзки я изтрива цялата (дупка/фигура/полилиния).</p>
+        <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай линия с Полилиния ПРЕЗ контура (или с краища върху него). 2) Кликни с Ножицата върху страната, която искаш да махнеш — всичко от линията натам се изрязва и линията става новият ръб. Клик върху линия без връзки я изтрива цялата (дупка/фигура/полилиния).</p>
+      )}
+
+      {tool === "image" && (
+        <div className="space-y-3">
+          <p className="text-sm text-ink/65 dark:text-paper/65">
+            Влачи върху чертежа, за да местиш подложната снимка. Контурите не се променят — мести се само изображението.
+          </p>
+          <label className="block text-xs text-ink/60 dark:text-paper/60">
+            Завъртане на снимката (°)
+            <input
+              className="field readout mt-1"
+              type="number"
+              step={0.5}
+              value={imgRotation}
+              onChange={(e) => onImgRotation(parseFloat(e.target.value) || 0)}
+            />
+          </label>
+          <input
+            type="range"
+            min={-180}
+            max={180}
+            step={0.5}
+            value={imgRotation}
+            onChange={(e) => onImgRotation(parseFloat(e.target.value))}
+            className="w-full accent-dye dark:accent-dye-bright"
+          />
+          <button className="btn-ghost w-full" onClick={onImgReset}>
+            Нулирай позицията и завъртането
+          </button>
+        </div>
       )}
 
       {(tool === "circle" || tool === "triangle" || tool === "square") && (
@@ -1524,7 +1799,7 @@ function ToolOptions({
               <strong className="readout">{radius.toFixed(2)} {unit}</strong>
             </div>
           </div>
-          <p className="text-xs text-ink/50 dark:text-paper/50">Клик върху чертежа поставя фигурата.</p>
+          <p className="text-xs text-ink/50 dark:text-paper/50">Влачене върху чертежа разпъва фигурата свободно (призрачен изглед). Само клик поставя фигура с този диаметър.</p>
         </div>
       )}
 
@@ -1690,7 +1965,8 @@ type IconName =
   | "offset"
   | "fullscreen"
   | "exitFullscreen"
-  | "ruler";
+  | "ruler"
+  | "image";
 
 function Icon({ name }: { name: IconName }) {
   const common = {
@@ -1795,6 +2071,13 @@ function Icon({ name }: { name: IconName }) {
       )}
       {name === "fullscreen" && <path {...common} d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4" />}
       {name === "exitFullscreen" && <path {...common} d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4" />}
+      {name === "image" && (
+        <>
+          <rect {...common} x="3.5" y="5" width="17" height="14" rx="2" />
+          <circle {...common} cx="8.5" cy="10" r="1.6" />
+          <path {...common} d="m6 18 4.5-4.5 3 3L17 13l3.5 3.5" />
+        </>
+      )}
       {name === "ruler" && (
         <>
           <rect {...common} x="3" y="9" width="18" height="6" rx="1" transform="rotate(-20 12 12)" />
