@@ -141,15 +141,19 @@ export default function ScannerPage() {
     const next: PipelineParams = {
       ...params,
       blur: 1,
-      morph: 0,
-      epsilonPct: 0.01,
+      morph: 1,
+      epsilonPct: 0.025,
       smoothIterations: 0,
-      minHolePct: 0.1,
-      threshold: "adaptive",
+      minHolePct: 0.5,
+      threshold: "otsu",
+      invert: "auto",
+      mirrorMode: "off",
     };
     setParams(next);
+    const nextImageOptions = { ...imageOptions, borderEnabled: false, borderWidth: 0 };
+    setImageOptions(nextImageOptions);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (imageRef.current) runDetection(next);
+    if (imageRef.current) applyImageOptionsToCurrent(nextImageOptions, next);
   };
 
   const updateImageOptions = (patch: Partial<ImageOptions>) => {

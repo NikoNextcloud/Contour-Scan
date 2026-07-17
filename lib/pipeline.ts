@@ -24,8 +24,8 @@ export const DEFAULT_IMAGE_OPTIONS: ImageOptions = {
   borderWidth: 0,
 };
 
-/** Longest image side we process; high value preserves A3 scanner detail for accurate contours. */
-export const MAX_PROCESS_SIDE = 7200;
+/** Longest image side we process; preserves A3 detail without exhausting browser memory. */
+export const MAX_PROCESS_SIDE = 4800;
 
 /**
  * Load a File/Blob into an ImageData, downscaling to MAX_PROCESS_SIDE.
@@ -133,7 +133,9 @@ export function detectContours(cv: any, imageData: ImageData, params: PipelinePa
   const bin = new cv.Mat();
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
-  const mats: any[] = [src, gray, bin, hierarchy];
+  const holeContours = new cv.MatVector();
+  const holeHierarchy = new cv.Mat();
+  const mats: any[] = [src, gray, bin, hierarchy, holeHierarchy];
 
   try {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
@@ -173,15 +175,15 @@ export function detectContours(cv: any, imageData: ImageData, params: PipelinePa
       kernel.delete();
     }
 
-    // 5. Contours with 2-level hierarchy: top level = outer shapes, children = holes.
-    cv.findContours(bin, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_NONE);
+    // 5. External contour first: this avoids internal pen lines/shadows being stitched into the outline.
+    const outerInput = bin.clone();
+    mats.push(outerInput);
+    cv.findContours(outerInput, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
 
-    // 6. Pick the largest top-level contour (parent == -1) as the object.
+    // 6. Pick the largest external contour as the object.
     let outerIdx = -1;
     let outerArea = 0;
     for (let i = 0; i < contours.size(); i++) {
-      const parent = hierarchy.intPtr(0, i)[3];
-      if (parent !== -1) continue;
       const area = cv.contourArea(contours.get(i));
       if (area > outerArea) {
         outerArea = area;
@@ -194,15 +196,20 @@ export function detectContours(cv: any, imageData: ImageData, params: PipelinePa
 
     const outer = approximate(cv, contours.get(outerIdx), params.epsilonPct);
 
-    // 7. Collect holes: children of the outer contour above the size threshold.
+    // 7. Collect internal holes separately, but only when they sit inside the selected outer contour.
     const inner: Pt[][] = [];
     const minHoleArea = (params.minHolePct / 100) * outerArea;
-    for (let i = 0; i < contours.size(); i++) {
-      const parent = hierarchy.intPtr(0, i)[3];
-      if (parent !== outerIdx) continue;
-      const c = contours.get(i);
-      if (cv.contourArea(c) >= minHoleArea) {
-        inner.push(approximate(cv, c, params.epsilonPct));
+    const holeInput = bin.clone();
+    mats.push(holeInput);
+    cv.findContours(holeInput, holeContours, holeHierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_NONE);
+    for (let i = 0; i < holeContours.size(); i++) {
+      const parent = holeHierarchy.intPtr(0, i)[3];
+      if (parent === -1) continue;
+      const c = holeContours.get(i);
+      const area = cv.contourArea(c);
+      if (area >= minHoleArea && area < outerArea * 0.85) {
+        const hole = approximate(cv, c, params.epsilonPct);
+        if (hole.length >= 3 && pointInPolyLocal(hole[0], outer)) inner.push(hole);
       }
     }
 
@@ -210,8 +217,21 @@ export function detectContours(cv: any, imageData: ImageData, params: PipelinePa
   } finally {
     mats.forEach((m) => m.delete());
     for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
+    for (let i = 0; i < holeContours.size(); i++) holeContours.get(i).delete();
     contours.delete();
+    holeContours.delete();
   }
+}
+
+function pointInPolyLocal(p: Pt, poly: Pt[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    const hit = a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y || 1e-9) + a.x;
+    if (hit) inside = !inside;
+  }
+  return inside;
 }
 
 /** approxPolyDP with epsilon as a percentage of the contour perimeter. */
