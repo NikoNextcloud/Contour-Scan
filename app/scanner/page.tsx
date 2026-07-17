@@ -71,7 +71,7 @@ export default function ScannerPage() {
       setError(null);
       try {
         setPhase("loadingCV");
-        const cv = await loadOpenCV({ timeoutMs: 4500 }).catch(() => null);
+        const cv = await loadOpenCV({ timeoutMs: 12000 }).catch(() => null);
         setPhase("processing");
         // Yield a frame so the spinner paints before the heavy sync work.
         await new Promise((r) => requestAnimationFrame(r));

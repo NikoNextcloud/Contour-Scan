@@ -315,8 +315,8 @@ export function detectContoursFallback(imageData: ImageData, params: PipelinePar
 
   const objectMask: ByteArray = new Uint8Array(width * height);
   for (const index of outerComponent.indices) objectMask[index] = 1;
-  const outerBoundary = boundaryPoints(objectMask, width, height, 1);
-  const outer = simplifyClosedPolygon(orderBoundaryByAngle(outerBoundary), params.epsilonPct);
+  const outerTrace = traceBoundary(objectMask, width, height);
+  const outer = simplifyClosedPolygon(smoothTrace(outerTrace), params.epsilonPct);
 
   const holes: Pt[][] = [];
   const backgroundInside: ByteArray = new Uint8Array(width * height);
@@ -327,8 +327,8 @@ export function detectContoursFallback(imageData: ImageData, params: PipelinePar
     if (component.touchesBorder || component.area < minHoleArea) continue;
     const holeMask: ByteArray = new Uint8Array(width * height);
     for (const index of component.indices) holeMask[index] = 1;
-    const holeBoundary = boundaryPoints(holeMask, width, height, 1);
-    const hole = simplifyClosedPolygon(orderBoundaryByAngle(holeBoundary), params.epsilonPct);
+    const holeTrace = traceBoundary(holeMask, width, height);
+    const hole = simplifyClosedPolygon(smoothTrace(holeTrace), params.epsilonPct);
     if (hole.length >= 3 && pointInPolygon(hole[0], outer)) holes.push(hole);
   }
 
@@ -507,31 +507,87 @@ function connectedComponents(
   return components;
 }
 
-function boundaryPoints(mask: ByteArray, width: number, height: number, value: 0 | 1): Pt[] {
-  const points: Pt[] = [];
-  const stride = Math.max(1, Math.floor(Math.max(width, height) / 900));
-  for (let y = 1; y < height - 1; y += stride) {
-    for (let x = 1; x < width - 1; x += stride) {
-      const i = y * width + x;
-      if (mask[i] !== value) continue;
-      if (
-        mask[i - 1] !== value ||
-        mask[i + 1] !== value ||
-        mask[i - width] !== value ||
-        mask[i + width] !== value
-      ) {
-        points.push({ x, y });
+/**
+ * Moore-neighbor boundary tracing (по посока на часовниковата стрелка).
+ * Връща ПОДРЕДЕН контур точно по ръба на обекта — без разбъркване и зигзаг,
+ * работи за всякакви форми (вкл. вдлъбнати), за разлика от подреждане по ъгъл.
+ */
+function traceBoundary(mask: ByteArray, width: number, height: number): Pt[] {
+  const at = (x: number, y: number): number =>
+    x < 0 || y < 0 || x >= width || y >= height ? 0 : mask[y * width + x];
+
+  // Стартова точка: първият пиксел на обекта при сканиране ред по ред.
+  let sx = -1;
+  let sy = -1;
+  outer: for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (mask[y * width + x]) {
+        sx = x;
+        sy = y;
+        break outer;
       }
     }
   }
-  return points;
+  if (sx === -1) return [];
+
+  // 8 посоки по часовниковата стрелка, започвайки от запад.
+  const dirs = [
+    [-1, 0],
+    [-1, -1],
+    [0, -1],
+    [1, -1],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+    [-1, 1],
+  ];
+
+  const path: Pt[] = [];
+  let cx = sx;
+  let cy = sy;
+  // Влезли сме в стартовия пиксел "отзад" (от запад — там няма обект).
+  let backtrack = 0;
+  const maxSteps = 4 * (width + height) * 8;
+
+  for (let step = 0; step < maxSteps; step++) {
+    path.push({ x: cx, y: cy });
+    // Обхождаме съседите по часовниковата стрелка, започвайки от посоката
+    // веднага след тази, от която дойдохме.
+    let found = false;
+    for (let k = 0; k < 8; k++) {
+      const d = (backtrack + 1 + k) % 8;
+      const nx = cx + dirs[d][0];
+      const ny = cy + dirs[d][1];
+      if (at(nx, ny)) {
+        // Новата "backtrack" посока сочи обратно към стария пиксел.
+        backtrack = (d + 4) % 8;
+        cx = nx;
+        cy = ny;
+        found = true;
+        break;
+      }
+    }
+    if (!found) break; // изолиран пиксел
+    if (cx === sx && cy === sy && path.length > 2) break; // затворихме контура
+  }
+  return path;
 }
 
-function orderBoundaryByAngle(points: Pt[]): Pt[] {
-  if (points.length <= 2) return points;
-  const cx = points.reduce((sum, point) => sum + point.x, 0) / points.length;
-  const cy = points.reduce((sum, point) => sum + point.y, 0) / points.length;
-  return [...points].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+/**
+ * Леко изглаждане на пикселната стълбица (прозорец 3) — маха дискретния
+ * шум от растеризацията, без да отмества контура от обекта.
+ */
+function smoothTrace(pts: Pt[]): Pt[] {
+  const n = pts.length;
+  if (n < 8) return pts;
+  const out: Pt[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = pts[(i - 1 + n) % n];
+    const b = pts[i];
+    const c = pts[(i + 1) % n];
+    out[i] = { x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3 };
+  }
+  return out;
 }
 
 function simplifyClosedPolygon(points: Pt[], epsilonPct: number): Pt[] {

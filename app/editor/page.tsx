@@ -54,6 +54,7 @@ type DragState =
   | { kind: "line-point"; li: number; pi: number }
   | { kind: "line-move"; li: number; last: Pt }
   | { kind: "bezier-handle"; li: number; pi: number; side: "prev" | "next" }
+  | { kind: "poly-bezier"; ci: number; pi: number; side: "prev" | "next"; base: Pt[]; anchorAfter: number }
   | { kind: "draw-shape"; shape: "circle" | "triangle" | "square"; start: Pt }
   | { kind: "image-move"; start: Pt; startOff: { x: number; y: number } }
   | { kind: "pan"; startX: number; startY: number; startTx: number; startTy: number }
@@ -191,6 +192,9 @@ export default function EditorPage() {
   const [selectedPoints, setSelectedPoints] = useState<Set<string>>(new Set());
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
   const [selectedLinePoint, setSelectedLinePoint] = useState<{ li: number; pi: number } | null>(null);
+  // Пен-тул контролери върху точка от КОНТУР: две дръжки за огъване на съседните сегменти.
+  const [bezierNode, setBezierNode] = useState<{ ci: number; pi: number } | null>(null);
+  const [bezierDrag, setBezierDrag] = useState<{ P: Pt; C: Pt } | null>(null);
   const [nodeMenu, setNodeMenu] = useState<{
     x: number;
     y: number;
@@ -413,6 +417,34 @@ export default function EditorPage() {
     return null;
   };
 
+  /** Позиции на двете дръжки за точка от контур: 1/3 към всеки съсед. */
+  const polyHandlePositions = useCallback(
+    (ci: number, pi: number): { prev: Pt; next: Pt; P: Pt } | null => {
+      const poly = polys[ci];
+      if (!poly || poly.length < 3) return null;
+      const n = poly.length;
+      const P = poly[pi];
+      const A = poly[(pi - 1 + n) % n];
+      const B = poly[(pi + 1) % n];
+      return {
+        P,
+        prev: { x: P.x + (A.x - P.x) / 3, y: P.y + (A.y - P.y) / 3 },
+        next: { x: P.x + (B.x - P.x) / 3, y: P.y + (B.y - P.y) / 3 },
+      };
+    },
+    [polys]
+  );
+
+  const hitPolyBezierHandle = (p: Pt): { ci: number; pi: number; side: "prev" | "next" } | null => {
+    if (!bezierNode) return null;
+    const h = polyHandlePositions(bezierNode.ci, bezierNode.pi);
+    if (!h) return null;
+    const tol = 10 / view.scale;
+    if (Math.hypot(h.prev.x - p.x, h.prev.y - p.y) <= tol) return { ...bezierNode, side: "prev" };
+    if (Math.hypot(h.next.x - p.x, h.next.y - p.y) <= tol) return { ...bezierNode, side: "next" };
+    return null;
+  };
+
   const setOpenLines = (lines: Pt[][]) => {
     setContours((cur) => (cur ? { ...cur, polylines: lines } : cur));
   };
@@ -597,6 +629,43 @@ export default function EditorPage() {
       }
     });
 
+    // Пен-тул дръжки върху избрана контурна точка
+    if (bezierNode && !bezierDrag) {
+      const h = polyHandlePositions(bezierNode.ci, bezierNode.pi);
+      if (h) {
+        ctx.strokeStyle = "#0891b2";
+        ctx.lineWidth = 1.3 / view.scale;
+        ctx.beginPath();
+        ctx.moveTo(h.P.x, h.P.y);
+        ctx.lineTo(h.prev.x, h.prev.y);
+        ctx.moveTo(h.P.x, h.P.y);
+        ctx.lineTo(h.next.x, h.next.y);
+        ctx.stroke();
+        [h.prev, h.next].forEach((hp) => {
+          ctx.beginPath();
+          ctx.arc(hp.x, hp.y, 4 / view.scale, 0, Math.PI * 2);
+          ctx.fillStyle = "#ffffff";
+          ctx.fill();
+          ctx.strokeStyle = "#0891b2";
+          ctx.stroke();
+        });
+      }
+    }
+    if (bezierDrag) {
+      ctx.strokeStyle = "#0891b2";
+      ctx.lineWidth = 1.3 / view.scale;
+      ctx.setLineDash([5 / view.scale, 4 / view.scale]);
+      ctx.beginPath();
+      ctx.moveTo(bezierDrag.P.x, bezierDrag.P.y);
+      ctx.lineTo(bezierDrag.C.x, bezierDrag.C.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(bezierDrag.C.x, bezierDrag.C.y, 4.5 / view.scale, 0, Math.PI * 2);
+      ctx.fillStyle = "#0891b2";
+      ctx.fill();
+    }
+
     if (selectedLinePoint) {
       const line = openLines[selectedLinePoint.li];
       const pi = selectedLinePoint.pi;
@@ -692,7 +761,7 @@ export default function EditorPage() {
         ctx.stroke();
       }
     }
-  }, [record, contours, polys, openLines, polyDraft, arcDraft, hoverPt, selectedPoints, selectedLine, selectedLinePoint, marquee, ghost, imgOffset, imgRotation, view, grid, gridStep, tool, pivot, pxToUnit, unitLabel]);
+  }, [record, contours, polys, openLines, polyDraft, arcDraft, hoverPt, selectedPoints, selectedLine, selectedLinePoint, bezierNode, bezierDrag, polyHandlePositions, marquee, ghost, imgOffset, imgRotation, view, grid, gridStep, tool, pivot, pxToUnit, unitLabel]);
 
   useEffect(() => {
     redraw();
@@ -1225,6 +1294,19 @@ export default function EditorPage() {
     }
 
     // --- select tool ---
+    // Дръжка на контурна точка (пен-тул): огъване на съседния сегмент.
+    const polyHandle = hitPolyBezierHandle(p);
+    if (polyHandle) {
+      pushUndo();
+      const base = [...polys[polyHandle.ci]];
+      const n = base.length;
+      const anchorAfter =
+        polyHandle.side === "prev" && polyHandle.pi > 0 ? polyHandle.pi + 12 : polyHandle.pi;
+      void n;
+      dragRef.current = { kind: "poly-bezier", ...polyHandle, base, anchorAfter };
+      setBezierNode(null);
+      return;
+    }
     const handle = hitBezierHandle(p);
     if (handle) {
       pushUndo();
@@ -1265,8 +1347,10 @@ export default function EditorPage() {
         if (sel.has(key)) sel.delete(key);
         else sel.add(key);
         setSelectedPoints(sel);
+        setBezierNode(null);
         return; // shift-click only edits the selection, no drag
       }
+      setBezierNode({ ci: hit.ci, pi: hit.pi });
       if (!selectedPoints.has(key)) {
         sel = new Set([key]);
         setSelectedPoints(sel);
@@ -1334,6 +1418,7 @@ export default function EditorPage() {
         return;
       }
       // Празно място: рисуваме правоъгълник за селекция (marquee).
+      setBezierNode(null);
       dragRef.current = { kind: "marquee", additive: e.shiftKey };
       setMarquee({ a: p, b: p });
     }
@@ -1361,6 +1446,40 @@ export default function EditorPage() {
       const dy = p.y - drag.last.y;
       setOpenLines(openLines.map((line, li) => (li === drag.li ? line.map((q) => ({ x: q.x + dx, y: q.y + dy })) : line)));
       drag.last = p;
+    } else if (drag.kind === "poly-bezier") {
+      const C = toImage(e);
+      const base = drag.base;
+      const n = base.length;
+      const P = base[drag.pi];
+      const neighborIdx = drag.side === "next" ? (drag.pi + 1) % n : (drag.pi - 1 + n) % n;
+      const Q = base[neighborIdx];
+      // Квадратна крива на Безие P → C → Q, 12 вътрешни точки.
+      const samples: Pt[] = [];
+      for (let k = 1; k <= 12; k++) {
+        const t = k / 13;
+        const u = 1 - t;
+        samples.push({
+          x: u * u * P.x + 2 * u * t * C.x + t * t * Q.x,
+          y: u * u * P.y + 2 * u * t * C.y + t * t * Q.y,
+        });
+      }
+      let rebuilt: Pt[];
+      if (drag.side === "next") {
+        // Сегмент pi → pi+1 (или към 0 при увиване).
+        rebuilt =
+          neighborIdx === 0
+            ? [...base, ...samples]
+            : [...base.slice(0, drag.pi + 1), ...samples, ...base.slice(drag.pi + 1)];
+      } else {
+        // Сегмент pi-1 → pi; при pi=0 сегментът е n-1 → 0 (в края на масива).
+        samples.reverse(); // да вървят от съседа към P
+        rebuilt =
+          drag.pi === 0
+            ? [...base, ...samples]
+            : [...base.slice(0, drag.pi), ...samples, ...base.slice(drag.pi)];
+      }
+      setPolys(polys.map((poly, i) => (i === drag.ci ? rebuilt : poly)));
+      setBezierDrag({ P, C });
     } else if (drag.kind === "bezier-handle") {
       const p = snapPt(toImage(e));
       const line = openLines[drag.li];
@@ -1418,6 +1537,13 @@ export default function EditorPage() {
 
   const onPointerUp = () => {
     const drag = dragRef.current;
+    if (drag?.kind === "poly-bezier") {
+      setBezierNode({ ci: drag.ci, pi: drag.anchorAfter });
+      setSelectedPoints(new Set([pointKey(drag.ci, drag.anchorAfter)]));
+      setBezierDrag(null);
+      dragRef.current = null;
+      return;
+    }
     if (drag?.kind === "draw-shape") {
       setGhost((g) => {
         if (g) {
@@ -1830,6 +1956,8 @@ export default function EditorPage() {
     setPolyDraft([]);
     setArcDraft([]);
     setGhost(null);
+    setBezierNode(null);
+    setBezierDrag(null);
   };
   fitRef.current = () => fitView(record);
 
@@ -1923,7 +2051,7 @@ export default function EditorPage() {
             />
           </div>
           <p className="mt-2 text-xs text-ink/50 dark:text-paper/50">
-            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. При изцяло избрана фигура: хвани я откъдето и да е (вкл. отвътре) и я влачи свободно. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
+            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. Клик върху точка показва сини дръжки (пен-тул): дръпни дръжка, за да огънеш линията в крива. При изцяло избрана фигура: хвани я откъдето и да е (вкл. отвътре) и я влачи свободно. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
           </p>
         </div>
 
