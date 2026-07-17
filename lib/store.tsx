@@ -68,7 +68,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const toast = useCallback((msg: string, kind: "ok" | "err" = "ok") => {
     const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev, { id, msg, kind }]);
+    setToasts((prev) => {
+      // Не трупаме еднакви съобщения едно върху друго.
+      if (prev.some((t) => t.msg === msg)) return prev;
+      return [...prev, { id, msg, kind }];
+    });
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3200);
   }, []);
 

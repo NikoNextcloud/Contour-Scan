@@ -129,6 +129,7 @@ export default function EditorPage() {
   const dragRef = useRef<DragState>(null);
   const [marquee, setMarquee] = useState<{ a: Pt; b: Pt } | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [panelTab, setPanelTab] = useState<"tool" | "repair" | "transform" | "data">("tool");
 
   useEffect(() => {
     const rec = getCurrent();
@@ -638,6 +639,20 @@ export default function EditorPage() {
     setPolyDraft([]);
   };
 
+  /**
+   * Смяна на инструмента. Ако оставяш Полилиния с начертана чернова,
+   * тя се завършва автоматично — така "чертая → ножица → режа" работи направо.
+   */
+  const switchTool = (next: ToolMode) => {
+    if (tool === "polyline" && next !== "polyline" && polyDraft.length >= 2) {
+      finishPolyline();
+      toast("Линията е завършена автоматично");
+    } else if (tool === "polyline" && next !== "polyline") {
+      setPolyDraft([]);
+    }
+    setTool(next);
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button === 2) return;
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -1055,17 +1070,17 @@ export default function EditorPage() {
         {/* --- Лява лента с инструменти (стил VCarve) --- */}
         <div className="panel h-fit p-2 xl:sticky xl:top-3">
           <ToolGroup label="Режим">
-            <IconTool active={tool === "select"} icon="cursor" label="Избор / маркиране" onClick={() => setTool("select")} />
-            <IconTool active={tool === "move"} icon="move" label="Премести всичко" onClick={() => setTool("move")} />
-            <IconTool active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => setTool("rotate")} />
-            <IconTool active={tool === "delete"} icon="trash" label="Изтриване на точки" onClick={() => setTool("delete")} />
-            <IconTool active={tool === "scissors"} icon="scissors" label="Ножица — клик върху линия я изтрива" onClick={() => setTool("scissors")} />
+            <IconTool active={tool === "select"} icon="cursor" label="Избор / маркиране" onClick={() => switchTool("select")} />
+            <IconTool active={tool === "move"} icon="move" label="Премести всичко" onClick={() => switchTool("move")} />
+            <IconTool active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => switchTool("rotate")} />
+            <IconTool active={tool === "delete"} icon="trash" label="Изтриване на точки" onClick={() => switchTool("delete")} />
+            <IconTool active={tool === "scissors"} icon="scissors" label="Ножица — клик върху линия я изтрива" onClick={() => switchTool("scissors")} />
           </ToolGroup>
           <ToolGroup label="Фигури">
-            <IconTool active={tool === "circle"} icon="circle" label="Кръг" onClick={() => setTool("circle")} />
-            <IconTool active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => setTool("triangle")} />
-            <IconTool active={tool === "square"} icon="square" label="Квадрат" onClick={() => setTool("square")} />
-            <IconTool active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => setTool("polyline")} />
+            <IconTool active={tool === "circle"} icon="circle" label="Кръг" onClick={() => switchTool("circle")} />
+            <IconTool active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => switchTool("triangle")} />
+            <IconTool active={tool === "square"} icon="square" label="Квадрат" onClick={() => switchTool("square")} />
+            <IconTool active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => switchTool("polyline")} />
           </ToolGroup>
           <ToolGroup label="Стъпки">
             <IconTool icon="undo" label="Назад (Undo)" disabled={!undoStack.length} onClick={undo} />
@@ -1104,174 +1119,151 @@ export default function EditorPage() {
           </p>
         </div>
 
-        <div className="max-h-[85vh] space-y-3 overflow-y-auto pr-1">
-          <ToolOptions
-            tool={tool}
-            diameter={shapeDiameter}
-            unit={shapeUnit}
-            selectedCount={selectedCount}
-            polyCount={polyDraft.length}
-            moveDx={moveDx}
-            moveDy={moveDy}
-            pivot={pivot ?? contourCenter(contours)}
-            usePivotCoordinates={usePivotCoordinates}
-            rotationType={rotationType}
-            rotationAngle={rotationAngle}
-            onDiameter={setShapeDiameter}
-            onMoveDx={setMoveDx}
-            onMoveDy={setMoveDy}
-            onApplyMove={applyMove}
-            onPivot={setPivot}
-            onUsePivotCoordinates={setUsePivotCoordinates}
-            onRotationType={setRotationType}
-            onRotationAngle={setRotationAngle}
-            onApplyRotation={applyRotation}
-            onDeleteSelected={deleteSelectedPoints}
-            onFinishPolyline={finishPolyline}
-            onClearPolyline={() => setPolyDraft([])}
-          />
+        <div className="max-h-[85vh] overflow-y-auto pr-1">
+          {/* --- Табове: всичко на едно място --- */}
+          <div className="panel sticky top-0 z-10 mb-3 grid grid-cols-4 gap-1 p-1">
+            <TabButton active={panelTab === "tool"} icon="cursor" label="Инструмент" onClick={() => setPanelTab("tool")} />
+            <TabButton active={panelTab === "repair"} icon="fillet" label="Поправка" onClick={() => setPanelTab("repair")} />
+            <TabButton active={panelTab === "transform"} icon="scale" label="Промени" onClick={() => setPanelTab("transform")} />
+            <TabButton active={panelTab === "data"} icon="ruler" label="Данни" onClick={() => setPanelTab("data")} />
+          </div>
 
-          {/* --- Селекция --- */}
-          <Section title="Селекция" hint={`Избрани точки: ${selectedCount}`}>
-            <div className="grid grid-cols-2 gap-2">
-              <button className="btn-ghost" onClick={selectAllPoints}>
-                <Icon name="selectAll" /> Всички
-              </button>
-              <button className="btn-ghost" disabled={!selectedCount} onClick={() => setSelectedPoints(new Set())}>
-                <Icon name="deselect" /> Изчисти
-              </button>
-              <button className="btn-ghost" disabled={!selectedCount} onClick={selectWholeContour}>
-                <Icon name="contour" /> Цял контур
-              </button>
-              <button
-                className="btn-ghost text-red-500 hover:bg-red-500/10"
-                disabled={!selectedCount}
-                onClick={deleteWholeContour}
-              >
-                <Icon name="trash" /> Изтрий контура
-              </button>
-            </div>
-            <button className="btn-ghost mt-2 w-full" disabled={!selectedCount} onClick={deleteSelectedPoints}>
-              <Icon name="trash" /> Изтрий избраните точки
-            </button>
-          </Section>
+          {panelTab === "tool" && (
+            <div className="space-y-3">
+              <ToolOptions
+                tool={tool}
+                diameter={shapeDiameter}
+                unit={shapeUnit}
+                selectedCount={selectedCount}
+                polyCount={polyDraft.length}
+                moveDx={moveDx}
+                moveDy={moveDy}
+                pivot={pivot ?? contourCenter(contours)}
+                usePivotCoordinates={usePivotCoordinates}
+                rotationType={rotationType}
+                rotationAngle={rotationAngle}
+                onDiameter={setShapeDiameter}
+                onMoveDx={setMoveDx}
+                onMoveDy={setMoveDy}
+                onApplyMove={applyMove}
+                onPivot={setPivot}
+                onUsePivotCoordinates={setUsePivotCoordinates}
+                onRotationType={setRotationType}
+                onRotationAngle={setRotationAngle}
+                onApplyRotation={applyRotation}
+                onDeleteSelected={deleteSelectedPoints}
+                onFinishPolyline={finishPolyline}
+                onClearPolyline={() => setPolyDraft([])}
+              />
 
-          {/* --- Поправка на контура --- */}
-          <Section title="Поправка на контура" hint="Ъгловите операции работят върху избраните точки">
-            <div className="grid grid-cols-2 gap-2">
-              <button className="btn-ghost" disabled={selectedCount < 3} onClick={straightenSelected}>
-                <Icon name="straighten" /> Изправи
-              </button>
-              <button className="btn-ghost" disabled={!selectedCount} onClick={smoothSelected}>
-                <Icon name="smooth" /> Изглади избр.
-              </button>
-              <button className="btn-ghost" disabled={!selectedCount} onClick={filletSelected}>
-                <Icon name="fillet" /> Закръгли ъгъл
-              </button>
-              <button className="btn-ghost" disabled={!selectedCount} onClick={chamferSelected}>
-                <Icon name="chamfer" /> Фаска
-              </button>
+              <Section title="Селекция" hint={`Избрани точки: ${selectedCount}`}>
+                <div className="grid grid-cols-2 gap-2">
+                  <ActionButton icon="selectAll" label="Избери всички" onClick={selectAllPoints} />
+                  <ActionButton icon="deselect" label="Изчисти избора" disabled={!selectedCount} onClick={() => setSelectedPoints(new Set())} />
+                  <ActionButton icon="contour" label="Целия контур" disabled={!selectedCount} onClick={selectWholeContour} />
+                  <ActionButton icon="trash" label="Изтрий точките" disabled={!selectedCount} onClick={deleteSelectedPoints} />
+                </div>
+                <div className="mt-2">
+                  <ActionButton icon="trash" label="Изтрий целия контур (дупка/фигура)" danger wide disabled={!selectedCount} onClick={deleteWholeContour} />
+                </div>
+              </Section>
             </div>
-            <NumberRow
-              label={`Радиус / фаска (${shapeUnit})`}
-              value={cornerRadius}
-              step={0.5}
-              min={0.1}
-              onChange={setCornerRadius}
-            />
-            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
-            <div className="grid grid-cols-2 gap-2">
-              <button className="btn-ghost" onClick={despikeAll}>
-                <Icon name="despike" /> Махни шипове
-              </button>
-              <button className="btn-ghost" onClick={resampleAll}>
-                <Icon name="resample" /> Преразпредели
-              </button>
-            </div>
-            <NumberRow
-              label={`Стъпка между точки (${shapeUnit})`}
-              value={resampleStep}
-              step={0.5}
-              min={0.2}
-              onChange={setResampleStep}
-            />
-            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                className="btn-ghost"
-                onClick={() => {
-                  applyAll((p) => chaikin(p, smoothStrength));
-                  toast("Контурът е изгладен");
-                }}
-              >
-                <Icon name="smooth" /> Изглади всичко
-              </button>
-              <button
-                className="btn-ghost"
-                onClick={() => {
-                  applyAll((p) => simplify(p, simplifyEps));
-                  toast("Контурът е опростен");
-                }}
-              >
-                <Icon name="simplify" /> Опрости
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <NumberRow label="Сила ×" value={smoothStrength} step={1} min={1} max={4} onChange={(v) => setSmoothStrength(Math.round(v))} />
-              <NumberRow label="Допуск (px)" value={simplifyEps} step={0.5} min={0.5} onChange={setSimplifyEps} />
-            </div>
-          </Section>
+          )}
 
-          {/* --- Трансформации --- */}
-          <Section title="Трансформации" hint="Прилагат се върху целия чертеж">
-            <div className="grid grid-cols-3 gap-2">
-              <button className="btn-ghost" onClick={() => mirror("x")}>
-                <Icon name="mirrorX" /> Огл. X
-              </button>
-              <button className="btn-ghost" onClick={() => mirror("y")}>
-                <Icon name="mirrorY" /> Огл. Y
-              </button>
-              <button className="btn-ghost" onClick={axisAlign}>
-                <Icon name="align" /> Изравни
-              </button>
+          {panelTab === "repair" && (
+            <div className="space-y-3">
+              <Section title="Избрани точки" hint="Първо маркирай точки на канваса (влачене = правоъгълник)">
+                <div className="grid grid-cols-2 gap-2">
+                  <ActionButton icon="straighten" label="Изправи в линия" disabled={selectedCount < 3} onClick={straightenSelected} />
+                  <ActionButton icon="smooth" label="Изглади избраните" disabled={!selectedCount} onClick={smoothSelected} />
+                  <ActionButton icon="fillet" label="Закръгли ъгъл" disabled={!selectedCount} onClick={filletSelected} />
+                  <ActionButton icon="chamfer" label="Фаска на ъгъл" disabled={!selectedCount} onClick={chamferSelected} />
+                </div>
+                <NumberRow
+                  label={`Радиус / фаска (${shapeUnit})`}
+                  value={cornerRadius}
+                  step={0.5}
+                  min={0.1}
+                  onChange={setCornerRadius}
+                />
+              </Section>
+
+              <Section title="Целият контур" hint="Автоматично почистване на целия чертеж">
+                <div className="grid grid-cols-2 gap-2">
+                  <ActionButton icon="despike" label="Махни шиповете" onClick={despikeAll} />
+                  <ActionButton icon="resample" label="Равни точки" onClick={resampleAll} />
+                  <ActionButton
+                    icon="smooth"
+                    label="Изглади всичко"
+                    onClick={() => {
+                      applyAll((p) => chaikin(p, smoothStrength));
+                      toast("Контурът е изгладен");
+                    }}
+                  />
+                  <ActionButton
+                    icon="simplify"
+                    label="Опрости (по-малко точки)"
+                    onClick={() => {
+                      applyAll((p) => simplify(p, simplifyEps));
+                      toast("Контурът е опростен");
+                    }}
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <NumberRow label={`Стъпка (${shapeUnit})`} value={resampleStep} step={0.5} min={0.2} onChange={setResampleStep} />
+                  <NumberRow label="Сила ×" value={smoothStrength} step={1} min={1} max={4} onChange={(v) => setSmoothStrength(Math.round(v))} />
+                  <NumberRow label="Допуск (px)" value={simplifyEps} step={0.5} min={0.5} onChange={setSimplifyEps} />
+                </div>
+              </Section>
             </div>
+          )}
 
-            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
-            <p className="mb-1 text-xs font-medium text-ink/60 dark:text-paper/60">Мащаб</p>
-            <div className="mb-2 flex gap-3 text-sm">
-              <label className="flex items-center gap-1.5">
-                <input type="radio" checked={scaleMode === "percent"} onChange={() => setScaleMode("percent")} />
-                Процент
-              </label>
-              <label className="flex items-center gap-1.5">
-                <input type="radio" checked={scaleMode === "width"} onChange={() => setScaleMode("width")} />
-                До ширина
-              </label>
+          {panelTab === "transform" && (
+            <div className="space-y-3">
+              <Section title="Обръщане и изравняване" hint="Прилагат се върху целия чертеж">
+                <div className="grid grid-cols-3 gap-2">
+                  <ActionButton icon="mirrorX" label="Огледало X" onClick={() => mirror("x")} />
+                  <ActionButton icon="mirrorY" label="Огледало Y" onClick={() => mirror("y")} />
+                  <ActionButton icon="align" label="Изравни 0°" onClick={axisAlign} />
+                </div>
+              </Section>
+
+              <Section title="Мащаб" hint="Преоразмери целия чертеж">
+                <div className="mb-2 flex gap-3 text-sm">
+                  <label className="flex items-center gap-1.5">
+                    <input type="radio" checked={scaleMode === "percent"} onChange={() => setScaleMode("percent")} />
+                    Процент
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <input type="radio" checked={scaleMode === "width"} onChange={() => setScaleMode("width")} />
+                    До ширина
+                  </label>
+                </div>
+                {scaleMode === "percent" ? (
+                  <NumberRow label="Мащаб (%)" value={scalePct} step={1} min={1} onChange={setScalePct} />
+                ) : (
+                  <NumberRow label={`Целева ширина (${shapeUnit})`} value={scaleTargetWidth} step={1} min={0.1} onChange={setScaleTargetWidth} />
+                )}
+                <div className="mt-2">
+                  <ActionButton icon="scale" label="Приложи мащаба" primary wide onClick={applyScale} />
+                </div>
+              </Section>
+
+              <Section title="Офсет / kerf" hint="+ разширява навън (дупките се свиват), − свива навътре. Компенсира дебелината на ножа/лазера.">
+                <NumberRow label={`Офсет (${shapeUnit})`} value={offsetMm} step={0.1} onChange={setOffsetMm} />
+                <div className="mt-2">
+                  <ActionButton icon="offset" label="Приложи офсета" primary wide onClick={applyOffset} />
+                </div>
+              </Section>
             </div>
-            {scaleMode === "percent" ? (
-              <NumberRow label="Мащаб (%)" value={scalePct} step={1} min={1} onChange={setScalePct} />
-            ) : (
-              <NumberRow label={`Целева ширина (${shapeUnit})`} value={scaleTargetWidth} step={1} min={0.1} onChange={setScaleTargetWidth} />
-            )}
-            <button className="btn-primary mt-1 w-full" onClick={applyScale}>
-              <Icon name="scale" /> Приложи мащаб
-            </button>
+          )}
 
-            <div className="my-2 h-px bg-paper-3 dark:bg-ink-3" aria-hidden />
-            <p className="mb-1 text-xs font-medium text-ink/60 dark:text-paper/60">
-              Офсет / kerf компенсация
-            </p>
-            <p className="mb-2 text-xs text-ink/50 dark:text-paper/50">
-              + разширява навън (дупките се свиват), − свива навътре. Компенсира дебелината на ножа/лазера.
-            </p>
-            <NumberRow label={`Офсет (${shapeUnit})`} value={offsetMm} step={0.1} onChange={setOffsetMm} />
-            <button className="btn-primary mt-1 w-full" onClick={applyOffset}>
-              <Icon name="offset" /> Приложи офсет
-            </button>
-          </Section>
-
-          <MeasurementsPanel m={liveMeasurements} calibration={record.calibration} />
-          <ExportButtons record={liveRecord} />
+          {panelTab === "data" && (
+            <div className="space-y-3">
+              <MeasurementsPanel m={liveMeasurements} calibration={record.calibration} />
+              <ExportButtons record={liveRecord} />
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1551,6 +1543,69 @@ function ToolOptions({
   );
 }
 
+/** Таб в обединения десен панел. */
+function TabButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: IconName;
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`flex flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] font-medium leading-none transition-colors ${
+        active
+          ? "bg-dye text-white dark:bg-dye-bright dark:text-ink"
+          : "text-ink/60 hover:bg-ink/5 dark:text-paper/60 dark:hover:bg-paper/5"
+      }`}
+      onClick={onClick}
+    >
+      <Icon name={icon} />
+      {label}
+    </button>
+  );
+}
+
+/** Едър, разбираем бутон за действие: икона отгоре, текст отдолу. */
+function ActionButton({
+  icon,
+  label,
+  onClick,
+  disabled,
+  danger,
+  primary,
+  wide,
+}: {
+  icon: IconName;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  primary?: boolean;
+  wide?: boolean;
+}) {
+  const tone = primary
+    ? "border-dye bg-dye text-white hover:bg-dye/90 dark:border-dye-bright dark:bg-dye-bright dark:text-ink"
+    : danger
+      ? "border-red-300 text-red-600 hover:bg-red-500/10 dark:border-red-900 dark:text-red-400"
+      : "border-paper-3 bg-paper-2 hover:bg-ink/5 dark:border-ink-3 dark:bg-ink-2 dark:hover:bg-paper/5";
+  return (
+    <button
+      className={`flex min-h-16 flex-col items-center justify-center gap-1.5 rounded-lg border px-2 py-2.5 text-center text-xs leading-tight transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tone} ${wide ? "w-full" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+    >
+      <Icon name={icon} />
+      {label}
+    </button>
+  );
+}
+
 /** Vertical toolbar group with a tiny caption (VCarve-style). */
 function ToolGroup({
   label,
@@ -1634,7 +1689,8 @@ type IconName =
   | "scale"
   | "offset"
   | "fullscreen"
-  | "exitFullscreen";
+  | "exitFullscreen"
+  | "ruler";
 
 function Icon({ name }: { name: IconName }) {
   const common = {
@@ -1739,6 +1795,12 @@ function Icon({ name }: { name: IconName }) {
       )}
       {name === "fullscreen" && <path {...common} d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4" />}
       {name === "exitFullscreen" && <path {...common} d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4" />}
+      {name === "ruler" && (
+        <>
+          <rect {...common} x="3" y="9" width="18" height="6" rx="1" transform="rotate(-20 12 12)" />
+          <path {...common} d="m7.5 13.5 1-2.7M11 12.2l1-2.7M14.5 11l1-2.7" transform="rotate(0)" />
+        </>
+      )}
     </svg>
   );
 }
