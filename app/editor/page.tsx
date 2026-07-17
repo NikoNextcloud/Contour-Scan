@@ -440,6 +440,109 @@ export default function EditorPage() {
     setSelectedPoints(new Set());
   };
 
+  /* ---------- Зашиване на начертана линия в контура (ножица) ---------- */
+
+
+  /** Позиция на най-близката точка ВЪРХУ затворен контур (дробен индекс). */
+  const nearestOnContour = (pts: Pt[], p: Pt) => {
+    let best = { index: 0, t: 0, dist: Infinity, point: pts[0] };
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy || 1;
+      let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const q = { x: a.x + t * dx, y: a.y + t * dy };
+      const d = Math.hypot(p.x - q.x, p.y - q.y);
+      if (d < best.dist) best = { index: i, t, dist: d, point: q };
+    }
+    return best;
+  };
+
+  /**
+   * Опит за "зашиване": ако начертана полилиния има двата си края върху
+   * кликнатия контур, участъкът от контура под клика се маха и се заменя
+   * с полилинията → нова затворена форма. Връща true при успех.
+   */
+  const spliceContourWithPolyline = (ci: number, clickP: Pt): boolean => {
+    const contour = polys[ci];
+    if (!contour || contour.length < 3 || !openLines.length) return false;
+    const n = contour.length;
+    const attachTol = 30 / view.scale;
+
+    // Най-подходящата линия: и двата ѝ края са близо до този контур.
+    let bestLine = -1;
+    let bestScore = Infinity;
+    let attA: ReturnType<typeof nearestOnContour> | null = null;
+    let attB: ReturnType<typeof nearestOnContour> | null = null;
+    openLines.forEach((line, li) => {
+      if (line.length < 2) return;
+      const a = nearestOnContour(contour, line[0]);
+      const b = nearestOnContour(contour, line[line.length - 1]);
+      if (a.dist <= attachTol && b.dist <= attachTol && a.dist + b.dist < bestScore) {
+        bestScore = a.dist + b.dist;
+        bestLine = li;
+        attA = a;
+        attB = b;
+      }
+    });
+    if (bestLine === -1 || !attA || !attB) return false;
+
+    const line = openLines[bestLine];
+    const posA = (attA as { index: number; t: number }).index + (attA as { t: number }).t;
+    const posB = (attB as { index: number; t: number }).index + (attB as { t: number }).t;
+    const click = nearestOnContour(contour, clickP);
+    const posClick = click.index + click.t;
+    const span = (posB - posA + n) % n;
+    if (span < 1e-6 || span > n - 1e-6) return false; // краищата съвпадат
+
+    // В коя дъга е кликът: A→B (напред) или B→A?
+    const relClick = (posClick - posA + n) % n;
+    const clickInAB = relClick > 0 && relClick < span;
+
+    // Запазваме дъгата БЕЗ клика; линията замества изрязаната дъга.
+    const keptFrom = clickInAB ? posB : posA;
+    const keptTo = clickInAB ? posA : posB;
+    const keptSpan = (keptTo - keptFrom + n) % n;
+    const arc: Pt[] = [];
+    for (let k = 0; k < n; k++) {
+      const idx = (Math.floor(keptFrom) + 1 + k) % n;
+      const rel = (idx - keptFrom + n) % n;
+      if (rel <= 0 || rel >= keptSpan) {
+        if (rel >= keptSpan) break;
+        continue;
+      }
+      arc.push(contour[idx]);
+    }
+
+    // Ориентираме линията така, че да започва от края на запазената дъга.
+    const keptEndPt = clickInAB
+      ? (attA as { point: Pt }).point
+      : (attB as { point: Pt }).point;
+    const dStart = Math.hypot(line[0].x - keptEndPt.x, line[0].y - keptEndPt.y);
+    const dEnd = Math.hypot(
+      line[line.length - 1].x - keptEndPt.x,
+      line[line.length - 1].y - keptEndPt.y
+    );
+    const bridge = dStart <= dEnd ? line : [...line].reverse();
+
+    const newContour = [...arc, ...bridge];
+    if (newContour.length < 3) return false;
+
+    pushUndo();
+    const nextPolys = polys.map((poly, i) => (i === ci ? newContour : poly));
+    setContours({
+      outer: nextPolys[0],
+      inner: nextPolys.slice(1),
+      polylines: openLines.filter((_, i) => i !== bestLine),
+    });
+    setSelectedPoints(new Set());
+    toast("Участъкът е заменен с начертаната линия");
+    return true;
+  };
+
   /** Ножица: клик върху линия я изтрива директно (без зелени отворени фигури). */
   const deleteNearestLine = (p: Pt) => {
     const tol = 18 / view.scale;
@@ -472,6 +575,10 @@ export default function EditorPage() {
       toast("Линията е изтрита");
       return;
     }
+
+    // Първо: ако има начертана линия с краища върху този контур — зашиваме я
+    // на мястото на кликнатия участък (нова форма).
+    if (spliceContourWithPolyline(best.idx, p)) return;
 
     if (best.idx === 0) {
       // Външният контур: заменяме го с най-голямата вътрешна фигура, ако има такава.
@@ -1401,7 +1508,7 @@ function ToolOptions({
       {tool === "delete" && <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху точка я изтрива веднага.</p>}
 
       {tool === "scissors" && (
-        <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху линия я изтрива директно: дупка, фигура или полилиния се маха цялата. Външният контур се пази (заменя се с най-голямата фигура, ако има такава).</p>
+        <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай нова форма с Полилиния, като краищата ѝ лягат върху контура. 2) Кликни с Ножицата върху стария участък — той се маха и линията ти става част от контура. Клик върху линия без връзки я изтрива цялата (дупка/фигура/полилиния).</p>
       )}
 
       {(tool === "circle" || tool === "triangle" || tool === "square") && (
