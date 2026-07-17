@@ -24,8 +24,8 @@ export const DEFAULT_IMAGE_OPTIONS: ImageOptions = {
   borderWidth: 0,
 };
 
-/** Longest image side we process; larger inputs are downscaled for speed. */
-export const MAX_PROCESS_SIDE = 2400;
+/** Longest image side we process; high value preserves A3 scanner detail for accurate contours. */
+export const MAX_PROCESS_SIDE = 7200;
 
 /**
  * Load a File/Blob into an ImageData, downscaling to MAX_PROCESS_SIDE.
@@ -174,7 +174,7 @@ export function detectContours(cv: any, imageData: ImageData, params: PipelinePa
     }
 
     // 5. Contours with 2-level hierarchy: top level = outer shapes, children = holes.
-    cv.findContours(bin, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
+    cv.findContours(bin, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_NONE);
 
     // 6. Pick the largest top-level contour (parent == -1) as the object.
     let outerIdx = -1;

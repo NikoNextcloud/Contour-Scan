@@ -35,14 +35,14 @@ export interface PipelineParams {
 }
 
 export const DEFAULT_PARAMS: PipelineParams = {
-  blur: 5,
+  blur: 1,
   threshold: "otsu",
-  morph: 3,
-  epsilonPct: 0.18,
+  morph: 1,
+  epsilonPct: 0.03,
   minHolePct: 0.5,
   invert: "auto",
   mirrorMode: "off",
-  smoothIterations: 1,
+  smoothIterations: 0,
 };
 
 /** Geometric measurements of a contour, in pixels. */

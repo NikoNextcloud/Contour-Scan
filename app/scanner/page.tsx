@@ -137,6 +137,21 @@ export default function ScannerPage() {
     debounceRef.current = setTimeout(() => runDetection(next), 350);
   };
 
+  const applyMaxAccuracy = () => {
+    const next: PipelineParams = {
+      ...params,
+      blur: 1,
+      morph: 0,
+      epsilonPct: 0.01,
+      smoothIterations: 0,
+      minHolePct: 0.1,
+      threshold: "adaptive",
+    };
+    setParams(next);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (imageRef.current) runDetection(next);
+  };
+
   const updateImageOptions = (patch: Partial<ImageOptions>) => {
     const next = { ...imageOptions, ...patch };
     setImageOptions(next);
@@ -552,6 +567,9 @@ export default function ScannerPage() {
                 <ActionButton icon="save" label="Запази" disabled={!contours} onClick={saveToHistory} />
                 <ActionButton icon="edit" label="Редактор" primary disabled={!contours} onClick={openInEditor} />
               </div>
+              <button className="btn-primary mt-3 w-full" onClick={applyMaxAccuracy}>
+                <ScannerSvgIcon name="spark" /> Макс. точност на контура
+              </button>
               <div className="mt-3 rounded-lg border border-paper-3 p-3 text-xs dark:border-ink-3">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-ink/60 dark:text-paper/60">Мащаб</span>
@@ -662,7 +680,7 @@ export default function ScannerPage() {
                   label={t.paramBlur}
                   min={1}
                   max={15}
-                  step={2}
+                  step={1}
                   value={params.blur}
                   onChange={(v) => updateParams({ blur: v })}
                 />
@@ -685,9 +703,9 @@ export default function ScannerPage() {
                 />
                 <Slider
                   label={t.paramEpsilon}
-                  min={0}
+                  min={0.005}
                   max={2}
-                  step={0.05}
+                  step={0.005}
                   value={params.epsilonPct}
                   onChange={(v) => updateParams({ epsilonPct: v })}
                 />
