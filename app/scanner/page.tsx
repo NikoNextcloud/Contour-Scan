@@ -119,6 +119,7 @@ export default function ScannerPage() {
         setCalibration(autoCalibration);
         setCalibPts([]);
         setCalibMode(false);
+        setScanView({ zoom: 1, tx: 0, ty: 0 });
         await runDetection(params);
       } catch (e: any) {
         setError(String(e?.message ?? t.error));
@@ -153,12 +154,8 @@ export default function ScannerPage() {
     if (!img || !canvas || !wrap) return;
 
     const displayW = wrap.clientWidth;
-    const availableH = wrap.clientHeight;
-    const baseScale = fullScreenScanner && availableH > 120
-      ? Math.min(displayW / img.canvas.width, availableH / img.canvas.height)
-      : displayW / img.canvas.width;
-    const scale = baseScale * scanView.zoom;
-    const displayH = fullScreenScanner && availableH > 120 ? availableH : Math.round(img.canvas.height * scale);
+    const displayH = wrap.clientHeight || Math.min(window.innerHeight - 180, 860);
+    const scale = scanView.zoom;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(displayW * dpr);
     canvas.height = Math.round(displayH * dpr);
@@ -166,6 +163,8 @@ export default function ScannerPage() {
     canvas.style.height = `${displayH}px`;
 
     const ctx = canvas.getContext("2d")!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, displayW, displayH);
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * scanView.tx, dpr * scanView.ty);
     ctx.drawImage(img.canvas, 0, 0);
 
@@ -201,11 +200,57 @@ export default function ScannerPage() {
         ctx.stroke();
       }
     }
-  }, [contours, calibPts, scanView, fullScreenScanner]);
+  }, [contours, calibPts, scanView]);
 
   const onScanWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    setScanView((view) => ({ ...view, zoom: Math.max(0.25, Math.min(6, view.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12))) }));
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    setScanView((view) => {
+      const zoom = Math.max(0.1, Math.min(8, view.zoom * factor));
+      const k = zoom / view.zoom;
+      return { zoom, tx: mx - (mx - view.tx) * k, ty: my - (my - view.ty) * k };
+    });
+  };
+
+  const centerScanView = () => {
+    const img = imageRef.current;
+    const wrap = wrapRef.current;
+    if (!img || !wrap) return;
+    setScanView((view) => ({
+      ...view,
+      tx: (wrap.clientWidth - img.canvas.width * view.zoom) / 2,
+      ty: (wrap.clientHeight - img.canvas.height * view.zoom) / 2,
+    }));
+  };
+
+  const setOneToOneView = () => {
+    setScanView({ zoom: 1, tx: 0, ty: 0 });
+  };
+
+  const fitScanToScreen = () => {
+    const img = imageRef.current;
+    const wrap = wrapRef.current;
+    if (!img || !wrap) return;
+    const pad = 24;
+    const zoom = Math.min(
+      (wrap.clientWidth - pad * 2) / img.canvas.width,
+      (wrap.clientHeight - pad * 2) / img.canvas.height
+    );
+    const nextZoom = Math.max(0.1, Math.min(8, zoom));
+    setScanView({
+      zoom: nextZoom,
+      tx: (wrap.clientWidth - img.canvas.width * nextZoom) / 2,
+      ty: (wrap.clientHeight - img.canvas.height * nextZoom) / 2,
+    });
+  };
+
+  const stepZoom = (factor: number) => {
+    setScanView((view) => ({ ...view, zoom: Math.max(0.1, Math.min(8, view.zoom * factor)) }));
   };
 
   const onScanPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -235,8 +280,7 @@ export default function ScannerPage() {
     if (!calibMode || !imageRef.current) return;
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
-    const baseScale = rect.width / imageRef.current.canvas.width;
-    const scale = baseScale * scanView.zoom;
+    const scale = scanView.zoom;
     const p: Pt = {
       x: (e.clientX - rect.left - scanView.tx) / scale,
       y: (e.clientY - rect.top - scanView.ty) / scale,
@@ -316,7 +360,7 @@ export default function ScannerPage() {
       className={
         fullScreenScanner
           ? "fixed inset-0 z-[100] overflow-hidden bg-paper p-3 text-ink dark:bg-ink dark:text-paper"
-          : "mx-auto max-w-6xl"
+          : "mx-auto max-w-[1760px]"
       }
     >
       <div className={fullScreenScanner ? "mb-3 flex items-center justify-between gap-3" : ""}>
@@ -405,8 +449,8 @@ export default function ScannerPage() {
         <div
           className={
             fullScreenScanner
-              ? "grid h-[calc(100vh-76px)] gap-3 lg:grid-cols-[minmax(0,1fr)_360px]"
-              : "grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]"
+              ? "grid h-[calc(100vh-76px)] gap-3 lg:grid-cols-[minmax(0,1fr)_380px]"
+              : "grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]"
           }
         >
           {/* Canvas column */}
@@ -416,7 +460,7 @@ export default function ScannerPage() {
               className={
                 fullScreenScanner
                   ? "panel graticule relative min-h-0 flex-1 overflow-hidden p-0"
-                  : "panel graticule relative overflow-hidden p-0"
+                  : "panel graticule relative h-[78vh] min-h-[720px] overflow-hidden p-0"
               }
             >
               <canvas
@@ -464,7 +508,7 @@ export default function ScannerPage() {
               </div>
             )}
 
-            <div className="flex flex-wrap gap-2">
+            <div className="hidden flex-wrap gap-2">
               <button className="btn-primary" onClick={() => setFullScreenScanner(true)}>
                 Цял екран
               </button>
@@ -493,6 +537,42 @@ export default function ScannerPage() {
 
           {/* Controls column */}
           <div className={fullScreenScanner ? "min-h-0 space-y-3 overflow-y-auto pr-1" : "space-y-4"}>
+            <section className="panel p-4">
+              <h2 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
+                Инструменти
+              </h2>
+              <div className="grid grid-cols-2 gap-2">
+                <ActionButton icon="expand" label="Цял екран" onClick={() => setFullScreenScanner(true)} />
+                <ActionButton icon="one" label="1:1 реален" active={Math.abs(scanView.zoom - 1) < 0.001} onClick={setOneToOneView} />
+                <ActionButton icon="fit" label="Побери" onClick={fitScanToScreen} />
+                <ActionButton icon="center" label="Центрирай" onClick={centerScanView} />
+                <ActionButton icon="zoomIn" label="Увеличи" onClick={() => stepZoom(1.18)} />
+                <ActionButton icon="zoomOut" label="Намали" onClick={() => stepZoom(1 / 1.18)} />
+                <ActionButton icon="image" label="Нова снимка" onClick={() => fileInputRef.current?.click()} />
+                <ActionButton icon="refresh" label="Обнови" disabled={phase !== "ready"} onClick={() => runDetection(params)} />
+                <ActionButton icon="save" label="Запази" disabled={!contours} onClick={saveToHistory} />
+                <ActionButton icon="edit" label="Редактор" primary disabled={!contours} onClick={openInEditor} />
+              </div>
+              <div className="mt-3 rounded-lg border border-paper-3 p-3 text-xs dark:border-ink-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-ink/60 dark:text-paper/60">Мащаб</span>
+                  <strong className="readout text-amber">{Math.round(scanView.zoom * 100)}%</strong>
+                </div>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={8}
+                  step={0.05}
+                  value={scanView.zoom}
+                  onChange={(e) => setScanView((view) => ({ ...view, zoom: parseFloat(e.target.value) }))}
+                  className="mt-2 w-full accent-dye dark:accent-dye-bright"
+                />
+                <p className="mt-2 text-ink/50 dark:text-paper/50">
+                  Скенът се зарежда 1:1. Влачи с мишката за местене, скролирай за zoom.
+                </p>
+              </div>
+            </section>
+
             {/* Calibration */}
             <section className="panel p-4">
               <h2 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
@@ -568,13 +648,15 @@ export default function ScannerPage() {
                   <Slider label="Контраст" min={-100} max={100} step={1} value={imageOptions.contrast} onChange={(v) => updateImageOptions({ contrast: v })} />
                   <Slider label="Яркост" min={-100} max={100} step={1} value={imageOptions.brightness} onChange={(v) => updateImageOptions({ brightness: v })} />
                   <Slider label="Гама" min={0.2} max={3} step={0.05} value={imageOptions.gamma} onChange={(v) => updateImageOptions({ gamma: v })} />
-                  <label className="mt-3 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.invert} onChange={(e) => updateImageOptions({ invert: e.target.checked })} /> Инвертиране</label>
-                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.grayscale} onChange={(e) => updateImageOptions({ grayscale: e.target.checked })} /> Черно-бяло</label>
-                  <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={imageOptions.borderEnabled} onChange={(e) => updateImageOptions({ borderEnabled: e.target.checked })} /> Добави рамка</label>
-                  <select className="field mt-2" value={imageOptions.borderShape} onChange={(e) => updateImageOptions({ borderShape: e.target.value as ImageOptions["borderShape"] })}>
-                    <option value="rect">Правоъгълна рамка</option>
-                    <option value="oval">Овална рамка</option>
-                  </select>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <ToggleButton active={imageOptions.invert} label="Инверт" icon="invert" onClick={() => updateImageOptions({ invert: !imageOptions.invert })} />
+                    <ToggleButton active={imageOptions.grayscale} label="Черно-бяло" icon="gray" onClick={() => updateImageOptions({ grayscale: !imageOptions.grayscale })} />
+                    <ToggleButton active={imageOptions.borderEnabled} label="Рамка" icon="border" onClick={() => updateImageOptions({ borderEnabled: !imageOptions.borderEnabled })} />
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <ToggleButton active={imageOptions.borderShape === "rect"} label="Правоъгълна" icon="rect" onClick={() => updateImageOptions({ borderShape: "rect" })} />
+                    <ToggleButton active={imageOptions.borderShape === "oval"} label="Овална" icon="circle" onClick={() => updateImageOptions({ borderShape: "oval" })} />
+                  </div>
                   <Slider label="Дебелина на рамката" min={0} max={80} step={1} value={imageOptions.borderWidth} onChange={(v) => updateImageOptions({ borderWidth: v })} />
                 </div>
                 <Slider
@@ -589,16 +671,10 @@ export default function ScannerPage() {
                   <label className="mb-1 block text-xs text-ink/60 dark:text-paper/60">
                     {t.paramThreshold}
                   </label>
-                  <select
-                    className="field"
-                    value={params.threshold}
-                    onChange={(e) =>
-                      updateParams({ threshold: e.target.value as PipelineParams["threshold"] })
-                    }
-                  >
-                    <option value="otsu">{t.paramThresholdOtsu}</option>
-                    <option value="adaptive">{t.paramThresholdAdaptive}</option>
-                  </select>
+                  <div className="grid grid-cols-2 gap-2">
+                    <ToggleButton active={params.threshold === "otsu"} label="Равен фон" icon="auto" onClick={() => updateParams({ threshold: "otsu" })} />
+                    <ToggleButton active={params.threshold === "adaptive"} label="Неравен фон" icon="spark" onClick={() => updateParams({ threshold: "adaptive" })} />
+                  </div>
                 </div>
                 <Slider
                   label={t.paramMorph}
@@ -636,17 +712,11 @@ export default function ScannerPage() {
                   <label className="mb-1 block text-xs text-ink/60 dark:text-paper/60">
                     {t.paramInvert}
                   </label>
-                  <select
-                    className="field"
-                    value={params.invert}
-                    onChange={(e) =>
-                      updateParams({ invert: e.target.value as PipelineParams["invert"] })
-                    }
-                  >
-                    <option value="auto">{t.invertAuto}</option>
-                    <option value="yes">{t.invertYes}</option>
-                    <option value="no">{t.invertNo}</option>
-                  </select>
+                  <div className="grid grid-cols-3 gap-2">
+                    <ToggleButton active={params.invert === "auto"} label="Авто" icon="auto" onClick={() => updateParams({ invert: "auto" })} />
+                    <ToggleButton active={params.invert === "yes"} label="Да" icon="invert" onClick={() => updateParams({ invert: "yes" })} />
+                    <ToggleButton active={params.invert === "no"} label="Не" icon="eye" onClick={() => updateParams({ invert: "no" })} />
+                  </div>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-ink/60 dark:text-paper/60">
@@ -734,6 +804,120 @@ export default function ScannerPage() {
         </div>
       )}
     </div>
+  );
+}
+
+type ScannerIcon =
+  | "expand"
+  | "one"
+  | "fit"
+  | "center"
+  | "zoomIn"
+  | "zoomOut"
+  | "image"
+  | "refresh"
+  | "save"
+  | "edit"
+  | "invert"
+  | "gray"
+  | "border"
+  | "rect"
+  | "circle"
+  | "auto"
+  | "spark"
+  | "eye"
+  | "mirror";
+
+function ActionButton({
+  icon,
+  label,
+  active,
+  primary,
+  disabled,
+  onClick,
+}: {
+  icon: ScannerIcon;
+  label: string;
+  active?: boolean;
+  primary?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        primary || active
+          ? "border-dye bg-dye text-white dark:border-dye-bright dark:bg-dye-bright dark:text-ink"
+          : "border-paper-3 bg-paper-2 hover:bg-ink/5 dark:border-ink-3 dark:bg-ink-2 dark:hover:bg-paper/5"
+      }`}
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+    >
+      <ScannerSvgIcon name={icon} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function ToggleButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: ScannerIcon;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-xs font-medium transition-colors ${
+        active
+          ? "border-dye bg-dye/12 text-dye dark:border-dye-bright dark:bg-dye-bright/15 dark:text-dye-bright"
+          : "border-paper-3 bg-paper-2 hover:bg-ink/5 dark:border-ink-3 dark:bg-ink-2 dark:hover:bg-paper/5"
+      }`}
+      onClick={onClick}
+      type="button"
+      title={label}
+    >
+      <ScannerSvgIcon name={icon} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function ScannerSvgIcon({ name }: { name: ScannerIcon }) {
+  const common = {
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" aria-hidden>
+      {name === "expand" && <path {...common} d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />}
+      {name === "one" && <path {...common} d="M7 4h10v16H7zM11 8l2-1v10" />}
+      {name === "fit" && <path {...common} d="M5 5h14v14H5zM9 9h6v6H9z" />}
+      {name === "center" && <path {...common} d="M12 3v18M3 12h18M8 8l8 8M16 8l-8 8" />}
+      {name === "zoomIn" && <path {...common} d="M10 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM10 8v4M8 10h4M14 14l5 5" />}
+      {name === "zoomOut" && <path {...common} d="M10 5a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM8 10h4M14 14l5 5" />}
+      {name === "image" && <path {...common} d="M4 6h16v12H4zM8 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM4 16l5-5 4 4 2-2 5 5" />}
+      {name === "refresh" && <path {...common} d="M20 7v5h-5M4 17v-5h5M18 9a7 7 0 0 0-12-2M6 15a7 7 0 0 0 12 2" />}
+      {name === "save" && <path {...common} d="M5 4h12l2 2v14H5zM8 4v6h8M8 20v-6h8v6" />}
+      {name === "edit" && <path {...common} d="M4 20h4l11-11-4-4L4 16v4zM13 7l4 4" />}
+      {name === "invert" && <path {...common} d="M12 4a8 8 0 1 0 0 16V4z" />}
+      {name === "gray" && <path {...common} d="M5 5h14v14H5zM5 12h14" />}
+      {name === "border" && <path {...common} d="M5 5h14v14H5zM8 8h8v8H8z" />}
+      {name === "rect" && <rect {...common} x="5" y="7" width="14" height="10" rx="1" />}
+      {name === "circle" && <circle {...common} cx="12" cy="12" r="7" />}
+      {name === "auto" && <path {...common} d="M5 12a7 7 0 0 1 12-5M19 5v5h-5M19 12a7 7 0 0 1-12 5M5 19v-5h5" />}
+      {name === "spark" && <path {...common} d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3zM18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8L18 15z" />}
+      {name === "eye" && <path {...common} d="M3 12s3-6 9-6 9 6 9 6-3 6-9 6-9-6-9-6zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z" />}
+      {name === "mirror" && <path {...common} d="M12 4v16M5 7l5 5-5 5V7zM19 7l-5 5 5 5V7z" />}
+    </svg>
   );
 }
 
