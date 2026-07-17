@@ -53,6 +53,7 @@ type DragState =
   | { kind: "move-all"; start: Pt; contours: ContourSet }
   | { kind: "line-point"; li: number; pi: number }
   | { kind: "line-move"; li: number; last: Pt }
+  | { kind: "bezier-handle"; li: number; pi: number; side: "prev" | "next" }
   | { kind: "draw-shape"; shape: "circle" | "triangle" | "square"; start: Pt }
   | { kind: "image-move"; start: Pt; startOff: { x: number; y: number } }
   | { kind: "pan"; startX: number; startY: number; startTx: number; startTy: number }
@@ -373,6 +374,45 @@ export default function EditorPage() {
     return best.li !== -1 && best.dist <= tol ? best.li : null;
   };
 
+  const hitMidpoint = (p: Pt):
+    | { type: "closed"; ci: number; index: number; point: Pt }
+    | { type: "line"; li: number; index: number; point: Pt }
+    | null => {
+    const tol = 8 / view.scale;
+    for (let ci = 0; ci < polys.length; ci++) {
+      const poly = polys[ci];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % poly.length];
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        if (Math.hypot(mid.x - p.x, mid.y - p.y) <= tol) return { type: "closed", ci, index: i, point: mid };
+      }
+    }
+    for (let li = 0; li < openLines.length; li++) {
+      const line = openLines[li];
+      for (let i = 0; i < line.length - 1; i++) {
+        const a = line[i];
+        const b = line[i + 1];
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        if (Math.hypot(mid.x - p.x, mid.y - p.y) <= tol) return { type: "line", li, index: i, point: mid };
+      }
+    }
+    return null;
+  };
+
+  const hitBezierHandle = (p: Pt): { li: number; pi: number; side: "prev" | "next" } | null => {
+    if (!selectedLinePoint) return null;
+    const { li, pi } = selectedLinePoint;
+    const line = openLines[li];
+    if (!line || pi <= 0 || pi >= line.length - 1) return null;
+    const tol = 10 / view.scale;
+    const prevHandle = { x: (line[pi - 1].x + line[pi].x) / 2, y: (line[pi - 1].y + line[pi].y) / 2 };
+    const nextHandle = { x: (line[pi + 1].x + line[pi].x) / 2, y: (line[pi + 1].y + line[pi].y) / 2 };
+    if (Math.hypot(prevHandle.x - p.x, prevHandle.y - p.y) <= tol) return { li, pi, side: "prev" };
+    if (Math.hypot(nextHandle.x - p.x, nextHandle.y - p.y) <= tol) return { li, pi, side: "next" };
+    return null;
+  };
+
   const setOpenLines = (lines: Pt[][]) => {
     setContours((cur) => (cur ? { ...cur, polylines: lines } : cur));
   };
@@ -556,6 +596,34 @@ export default function EditorPage() {
         ctx.setLineDash([]);
       }
     });
+
+    if (selectedLinePoint) {
+      const line = openLines[selectedLinePoint.li];
+      const pi = selectedLinePoint.pi;
+      if (line && pi > 0 && pi < line.length - 1) {
+        const p = line[pi];
+        const handles = [
+          { x: (line[pi - 1].x + p.x) / 2, y: (line[pi - 1].y + p.y) / 2 },
+          { x: (line[pi + 1].x + p.x) / 2, y: (line[pi + 1].y + p.y) / 2 },
+        ];
+        ctx.strokeStyle = "#0891b2";
+        ctx.lineWidth = 1.3 / view.scale;
+        ctx.beginPath();
+        handles.forEach((h) => {
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(h.x, h.y);
+        });
+        ctx.stroke();
+        handles.forEach((h) => {
+          ctx.beginPath();
+          ctx.rect(h.x - 3.2 / view.scale, h.y - 3.2 / view.scale, 6.4 / view.scale, 6.4 / view.scale);
+          ctx.fillStyle = "#ffffff";
+          ctx.fill();
+          ctx.strokeStyle = "#0891b2";
+          ctx.stroke();
+        });
+      }
+    }
 
     polys.slice(1).forEach((poly) => drawDimension(poly, true));
 
@@ -944,8 +1012,8 @@ export default function EditorPage() {
     const r = d / 2;
     let pts: Pt[];
     if (shape === "circle") {
-      pts = Array.from({ length: 72 }, (_, i) => {
-        const a = (i / 72) * Math.PI * 2;
+      pts = Array.from({ length: 4 }, (_, i) => {
+        const a = -Math.PI / 2 + (i / 4) * Math.PI * 2;
         return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r };
       });
     } else if (shape === "triangle") {
@@ -969,8 +1037,8 @@ export default function EditorPage() {
   const shapeFromDrag = (shape: "circle" | "triangle" | "square", a: Pt, b: Pt): Pt[] => {
     if (shape === "circle") {
       const r = Math.hypot(b.x - a.x, b.y - a.y);
-      return Array.from({ length: 72 }, (_, i) => {
-        const ang = (i / 72) * Math.PI * 2;
+      return Array.from({ length: 4 }, (_, i) => {
+        const ang = -Math.PI / 2 + (i / 4) * Math.PI * 2;
         return { x: a.x + Math.cos(ang) * r, y: a.y + Math.sin(ang) * r };
       });
     }
@@ -1157,6 +1225,12 @@ export default function EditorPage() {
     }
 
     // --- select tool ---
+    const handle = hitBezierHandle(p);
+    if (handle) {
+      pushUndo();
+      dragRef.current = { kind: "bezier-handle", ...handle };
+      return;
+    }
     // Ctrl/Cmd + клик върху линия: добавя нова точка там.
     if (e.ctrlKey || e.metaKey) {
       let best = { ci: -1, index: 0, dist: Infinity };
@@ -1287,6 +1361,21 @@ export default function EditorPage() {
       const dy = p.y - drag.last.y;
       setOpenLines(openLines.map((line, li) => (li === drag.li ? line.map((q) => ({ x: q.x + dx, y: q.y + dy })) : line)));
       drag.last = p;
+    } else if (drag.kind === "bezier-handle") {
+      const p = snapPt(toImage(e));
+      const line = openLines[drag.li];
+      if (line && drag.pi > 0 && drag.pi < line.length - 1) {
+        const a = drag.side === "prev" ? line[drag.pi - 1] : line[drag.pi];
+        const c = drag.side === "prev" ? line[drag.pi] : line[drag.pi + 1];
+        const bez = bezierFrom3Points(a, p, c, 12);
+        setOpenLines(openLines.map((l, li) => {
+          if (li !== drag.li) return l;
+          return drag.side === "prev"
+            ? [...l.slice(0, drag.pi - 1), ...bez, ...l.slice(drag.pi + 1)]
+            : [...l.slice(0, drag.pi), ...bez, ...l.slice(drag.pi + 2)];
+        }));
+        setSelectedLinePoint({ li: drag.li, pi: drag.side === "prev" ? drag.pi + 5 : drag.pi + 6 });
+      }
     } else if (drag.kind === "marquee") {
       const p = toImage(e);
       setMarquee((m) => (m ? { a: m.a, b: p } : m));
@@ -1381,6 +1470,30 @@ export default function EditorPage() {
     }
     if (tool !== "select") return;
     const p = toImage(e);
+    const mid = hitMidpoint(p);
+    if (mid) {
+      pushUndo();
+      if (mid.type === "line") {
+        setOpenLines(openLines.map((line, li) => {
+          if (li !== mid.li) return line;
+          const copy = [...line];
+          copy.splice(mid.index + 1, 0, mid.point);
+          return copy;
+        }));
+        setSelectedLine(mid.li);
+        setSelectedLinePoint({ li: mid.li, pi: mid.index + 1 });
+      } else {
+        const next = polys.map((poly, ci) => {
+          if (ci !== mid.ci) return poly;
+          const copy = [...poly];
+          copy.splice(mid.index + 1, 0, mid.point);
+          return copy;
+        });
+        setPolys(next);
+        setSelectedPoints(new Set([pointKey(mid.ci, mid.index + 1)]));
+      }
+      return;
+    }
     const lineHit = hitOpenLine(p);
     if (lineHit !== null) {
       let best = { index: 0, dist: Infinity };
@@ -1769,6 +1882,18 @@ export default function EditorPage() {
             <IconTool icon="undo" label="Назад (Undo)" disabled={!undoStack.length} onClick={undo} />
             <IconTool icon="redo" label="Напред (Redo)" disabled={!redoStack.length} onClick={redo} />
           </ToolGroup>
+          <ToolGroup label="Панели">
+            <IconTool active={panelTab === "tool"} icon="cursor" label="Инструмент" onClick={() => setPanelTab("tool")} />
+            <IconTool active={panelTab === "repair"} icon="fillet" label="Поправка" onClick={() => setPanelTab("repair")} />
+            <IconTool active={panelTab === "transform"} icon="scale" label="Промени" onClick={() => setPanelTab("transform")} />
+            <IconTool active={panelTab === "data"} icon="ruler" label="Данни" onClick={() => setPanelTab("data")} />
+          </ToolGroup>
+          <ToolGroup label="Прилепяне">
+            <IconTool icon="arrowLeft" label="Mirror/прилепи наляво" onClick={() => mirrorToSide("left")} />
+            <IconTool icon="arrowRight" label="Mirror/прилепи надясно" onClick={() => mirrorToSide("right")} />
+            <IconTool icon="arrowUp" label="Mirror/прилепи нагоре" onClick={() => mirrorToSide("top")} />
+            <IconTool icon="arrowDown" label="Mirror/прилепи надолу" onClick={() => mirrorToSide("bottom")} />
+          </ToolGroup>
           <ToolGroup label="Изглед" last>
             <IconTool active={grid} icon="grid" label="Мрежа" onClick={() => setGrid(!grid)} />
             <IconTool active={snap} icon="magnet" label="Прилепване към мрежата" onClick={() => setSnap(!snap)} />
@@ -1804,7 +1929,7 @@ export default function EditorPage() {
 
         <div className="max-h-[85vh] overflow-y-auto pr-1">
           {/* --- Табове: всичко на едно място --- */}
-          <div className="panel sticky top-0 z-10 mb-3 grid grid-cols-4 gap-1 p-1">
+          <div className="panel sticky top-0 z-10 mb-3 grid grid-cols-4 gap-1 p-1 opacity-95">
             <TabButton active={panelTab === "tool"} icon="cursor" label="Инструмент" onClick={() => setPanelTab("tool")} />
             <TabButton active={panelTab === "repair"} icon="fillet" label="Поправка" onClick={() => setPanelTab("repair")} />
             <TabButton active={panelTab === "transform"} icon="scale" label="Промени" onClick={() => setPanelTab("transform")} />
@@ -1949,6 +2074,11 @@ export default function EditorPage() {
                   Създай огледално копие
                 </label>
                 <NumberRow label={`Разстояние (${shapeUnit})`} value={mirrorGap} step={0.5} min={0} onChange={setMirrorGap} />
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  <ActionButton icon="magnet" label="Долепи 0" onClick={() => setMirrorGap(0)} />
+                  <ActionButton icon="magnet" label={`Фуга 1 ${shapeUnit}`} onClick={() => setMirrorGap(1)} />
+                  <ActionButton icon="magnet" label={`Фуга 5 ${shapeUnit}`} onClick={() => setMirrorGap(5)} />
+                </div>
               </Section>
 
               <Section title="Мащаб" hint="Преоразмери целия чертеж">

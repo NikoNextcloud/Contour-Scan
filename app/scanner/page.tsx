@@ -449,17 +449,17 @@ export default function ScannerPage() {
           className={
             fullScreenScanner
               ? "grid h-[calc(100vh-76px)] gap-3 lg:grid-cols-[minmax(0,1fr)_380px]"
-              : "grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]"
+              : "grid h-[calc(100vh-116px)] min-h-[760px] gap-4 lg:grid-cols-[minmax(0,1fr)_360px]"
           }
         >
           {/* Canvas column */}
-          <div className={fullScreenScanner ? "flex min-h-0 min-w-0 flex-col gap-3" : "min-w-0 space-y-4"}>
+          <div className={fullScreenScanner ? "flex min-h-0 min-w-0 flex-col gap-3" : "sticky top-3 flex min-h-0 min-w-0 flex-col gap-3 self-start"}>
             <div
               ref={wrapRef}
               className={
                 fullScreenScanner
                   ? "panel graticule relative min-h-0 flex-1 overflow-hidden p-0"
-                  : "panel graticule relative h-[78vh] min-h-[720px] overflow-hidden p-0"
+                  : "panel graticule relative h-[calc(100vh-170px)] min-h-[720px] overflow-hidden p-0"
               }
             >
               <canvas
@@ -535,7 +535,7 @@ export default function ScannerPage() {
           </div>
 
           {/* Controls column */}
-          <div className={fullScreenScanner ? "min-h-0 space-y-3 overflow-y-auto pr-1" : "space-y-4"}>
+          <div className={fullScreenScanner ? "min-h-0 space-y-3 overflow-y-auto pr-1" : "min-h-0 space-y-4 overflow-y-auto pr-1"}>
             <section className="panel p-4">
               <h2 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-ink/60 dark:text-paper/60">
                 Инструменти
