@@ -43,12 +43,16 @@ type ToolMode =
   | "triangle"
   | "square"
   | "polyline"
+  | "arc"
+  | "arc"
   | "image";
 
 type DragState =
   | { kind: "drag-selected"; last: Pt; selection: Set<string> }
   | { kind: "marquee"; additive: boolean }
   | { kind: "move-all"; start: Pt; contours: ContourSet }
+  | { kind: "line-point"; li: number; pi: number }
+  | { kind: "line-move"; li: number; last: Pt }
   | { kind: "draw-shape"; shape: "circle" | "triangle" | "square"; start: Pt }
   | { kind: "image-move"; start: Pt; startOff: { x: number; y: number } }
   | { kind: "pan"; startX: number; startY: number; startTx: number; startTy: number }
@@ -56,6 +60,64 @@ type DragState =
 
 const clone = (c: ContourSet): ContourSet => JSON.parse(JSON.stringify(c));
 const pointKey = (ci: number, pi: number) => `${ci}:${pi}`;
+
+const polyLength = (pts: Pt[], closed = false) => {
+  let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) total += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+  if (closed && pts.length > 2) total += Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y);
+  return total;
+};
+
+const boundsOf = (sets: Pt[][]) => {
+  const pts = sets.flat();
+  return pts.reduce(
+    (acc, p) => ({
+      minX: Math.min(acc.minX, p.x),
+      minY: Math.min(acc.minY, p.y),
+      maxX: Math.max(acc.maxX, p.x),
+      maxY: Math.max(acc.maxY, p.y),
+    }),
+    { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+  );
+};
+
+const arcFrom3Points = (a: Pt, b: Pt, c: Pt, steps = 48): Pt[] => {
+  const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+  if (Math.abs(d) < 1e-6) return [a, b, c];
+  const ux =
+    ((a.x * a.x + a.y * a.y) * (b.y - c.y) +
+      (b.x * b.x + b.y * b.y) * (c.y - a.y) +
+      (c.x * c.x + c.y * c.y) * (a.y - b.y)) /
+    d;
+  const uy =
+    ((a.x * a.x + a.y * a.y) * (c.x - b.x) +
+      (b.x * b.x + b.y * b.y) * (a.x - c.x) +
+      (c.x * c.x + c.y * c.y) * (b.x - a.x)) /
+    d;
+  const center = { x: ux, y: uy };
+  const radius = Math.hypot(a.x - ux, a.y - uy);
+  const aa = Math.atan2(a.y - uy, a.x - ux);
+  const ab = Math.atan2(b.y - uy, b.x - ux);
+  const ac = Math.atan2(c.y - uy, c.x - ux);
+  const norm = (v: number) => (v + Math.PI * 2) % (Math.PI * 2);
+  const betweenCcw = (start: number, mid: number, end: number) => {
+    const s = norm(start);
+    const m = norm(mid);
+    const e = norm(end);
+    return s <= e ? m >= s && m <= e : m >= s || m <= e;
+  };
+  let end = ac;
+  if (!betweenCcw(aa, ab, ac)) {
+    if (end > aa) end -= Math.PI * 2;
+  } else if (end < aa) {
+    end += Math.PI * 2;
+  }
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const t = i / steps;
+    const ang = aa + (end - aa) * t;
+    return { x: center.x + Math.cos(ang) * radius, y: center.y + Math.sin(ang) * radius };
+  });
+};
 
 const mapContourSet = (c: ContourSet, fn: (p: Pt) => Pt): ContourSet => ({
   outer: c.outer.map(fn),
@@ -113,7 +175,16 @@ export default function EditorPage() {
   const [rotationAngle, setRotationAngle] = useState(0);
   const [appliedAbsoluteAngle, setAppliedAbsoluteAngle] = useState(0);
   const [polyDraft, setPolyDraft] = useState<Pt[]>([]);
+  const [arcDraft, setArcDraft] = useState<Pt[]>([]);
+  const [hoverPt, setHoverPt] = useState<Pt | null>(null);
   const [selectedPoints, setSelectedPoints] = useState<Set<string>>(new Set());
+  const [selectedLine, setSelectedLine] = useState<number | null>(null);
+  const [selectedLinePoint, setSelectedLinePoint] = useState<{ li: number; pi: number } | null>(null);
+  const [nodeMenu, setNodeMenu] = useState<{
+    x: number;
+    y: number;
+    target: { type: "closed"; ci: number; pi: number } | { type: "line"; li: number; pi: number };
+  } | null>(null);
   const [undoStack, setUndoStack] = useState<ContourSet[]>([]);
   const [redoStack, setRedoStack] = useState<ContourSet[]>([]);
   // Repair & transform parameters (mm when calibrated, px otherwise)
@@ -123,6 +194,8 @@ export default function EditorPage() {
   const [scaleMode, setScaleMode] = useState<"percent" | "width">("percent");
   const [scalePct, setScalePct] = useState(100);
   const [scaleTargetWidth, setScaleTargetWidth] = useState(100);
+  const [mirrorCopy, setMirrorCopy] = useState(true);
+  const [mirrorGap, setMirrorGap] = useState(0);
   const [smoothStrength, setSmoothStrength] = useState(settings.smoothing);
   const [simplifyEps, setSimplifyEps] = useState(2);
 
@@ -189,6 +262,14 @@ export default function EditorPage() {
   const polys = useMemo(() => (contours ? [contours.outer, ...contours.inner] : []), [contours]);
   const openLines = useMemo(() => contours?.polylines ?? [], [contours]);
   const selectedCount = selectedPoints.size;
+  const pxToUnit = useCallback(
+    (value: number) => {
+      const k = record?.calibration?.mmPerPx;
+      return k ? value * k : value;
+    },
+    [record]
+  );
+  const unitLabel = record?.calibration ? "mm" : "px";
 
   const setPolys = (next: Pt[][]) => {
     setContours((cur) => ({ outer: next[0], inner: next.slice(1), polylines: cur?.polylines ?? [] }));
@@ -257,6 +338,33 @@ export default function EditorPage() {
       }
     }
     return null;
+  };
+
+  const hitLinePoint = (p: Pt): { li: number; pi: number } | null => {
+    const tol = 11 / view.scale;
+    for (let li = 0; li < openLines.length; li++) {
+      for (let pi = 0; pi < openLines[li].length; pi++) {
+        const q = openLines[li][pi];
+        if (Math.hypot(q.x - p.x, q.y - p.y) <= tol) return { li, pi };
+      }
+    }
+    return null;
+  };
+
+  const hitOpenLine = (p: Pt): number | null => {
+    const tol = 12 / view.scale;
+    let best = { li: -1, dist: Infinity };
+    openLines.forEach((line, li) => {
+      for (let i = 0; i < line.length - 1; i++) {
+        const dist = pointToSegment(p, line[i], line[i + 1]);
+        if (dist < best.dist) best = { li, dist };
+      }
+    });
+    return best.li !== -1 && best.dist <= tol ? best.li : null;
+  };
+
+  const setOpenLines = (lines: Pt[][]) => {
+    setContours((cur) => (cur ? { ...cur, polylines: lines } : cur));
   };
 
   const diameterPx = () => {
@@ -384,8 +492,65 @@ export default function EditorPage() {
       }
     };
 
-    openLines.forEach((line) => drawOpen(line, "#16a34a"));
+    const labelAt = (text: string, p: Pt) => {
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, view.tx * dpr, view.ty * dpr);
+      ctx.scale(view.scale, view.scale);
+      ctx.font = `${12 / view.scale}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+      ctx.fillStyle = "#111827";
+      ctx.strokeStyle = "rgba(255,255,255,0.88)";
+      ctx.lineWidth = 4 / view.scale;
+      ctx.strokeText(text, p.x + 8 / view.scale, p.y - 8 / view.scale);
+      ctx.fillText(text, p.x + 8 / view.scale, p.y - 8 / view.scale);
+      ctx.restore();
+    };
+
+    const drawDimension = (pts: Pt[], closed: boolean) => {
+      if (pts.length < 2) return;
+      const b = boundsOf([pts]);
+      const w = pxToUnit(b.maxX - b.minX);
+      const h = pxToUnit(b.maxY - b.minY);
+      const len = pxToUnit(polyLength(pts, closed));
+      const text = closed
+        ? `W:${w.toFixed(1)} ${unitLabel}  H:${h.toFixed(1)} ${unitLabel}`
+        : `L:${len.toFixed(1)} ${unitLabel}`;
+      labelAt(text, { x: b.maxX, y: b.minY });
+    };
+
+    openLines.forEach((line, li) => {
+      drawOpen(line, selectedLine === li ? "#2563eb" : "#16a34a");
+      drawDimension(line, false);
+      if (selectedLine === li || selectedLinePoint?.li === li) {
+        const b = boundsOf([line]);
+        ctx.strokeStyle = "#2563eb";
+        ctx.lineWidth = 1.4 / view.scale;
+        ctx.setLineDash([5 / view.scale, 4 / view.scale]);
+        ctx.strokeRect(b.minX, b.minY, b.maxX - b.minX, b.maxY - b.minY);
+        ctx.setLineDash([]);
+      }
+    });
+
+    polys.slice(1).forEach((poly) => drawDimension(poly, true));
+
     drawOpen(polyDraft, "#e8a33d");
+    if (tool === "polyline" && polyDraft.length > 0 && hoverPt) {
+      const last = polyDraft[polyDraft.length - 1];
+      ctx.beginPath();
+      ctx.moveTo(last.x, last.y);
+      ctx.lineTo(hoverPt.x, hoverPt.y);
+      ctx.strokeStyle = "#111827";
+      ctx.lineWidth = 1.2 / view.scale;
+      ctx.setLineDash([3 / view.scale, 3 / view.scale]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const l = pxToUnit(Math.hypot(hoverPt.x - last.x, hoverPt.y - last.y));
+      const a = (Math.atan2(hoverPt.y - last.y, hoverPt.x - last.x) * 180) / Math.PI;
+      labelAt(`L:${l.toFixed(1)} ${unitLabel}\nA:${a.toFixed(1)}`, hoverPt);
+    }
+
+    const arcPreview = arcDraft.length === 2 && hoverPt ? arcFrom3Points(arcDraft[0], arcDraft[1], hoverPt) : arcDraft;
+    drawOpen(arcPreview, "#a855f7");
+    if (tool === "arc" && arcPreview.length > 1) drawDimension(arcPreview, false);
 
     // Селекционен правоъгълник (marquee)
     if (marquee) {
@@ -432,7 +597,7 @@ export default function EditorPage() {
         ctx.stroke();
       }
     }
-  }, [record, contours, polys, openLines, polyDraft, selectedPoints, marquee, ghost, imgOffset, imgRotation, view, grid, gridStep, tool, pivot]);
+  }, [record, contours, polys, openLines, polyDraft, arcDraft, hoverPt, selectedPoints, selectedLine, selectedLinePoint, marquee, ghost, imgOffset, imgRotation, view, grid, gridStep, tool, pivot, pxToUnit, unitLabel]);
 
   useEffect(() => {
     redraw();
@@ -444,6 +609,27 @@ export default function EditorPage() {
   }, [redraw]);
 
   const deleteSelectedPoints = () => {
+    if (selectedLine !== null) {
+      pushUndo();
+      setOpenLines(openLines.filter((_, i) => i !== selectedLine));
+      setSelectedLine(null);
+      setSelectedLinePoint(null);
+      toast("Полилинията е изтрита");
+      return;
+    }
+    if (selectedLinePoint) {
+      const { li, pi } = selectedLinePoint;
+      if (!openLines[li] || openLines[li].length <= 2) {
+        pushUndo();
+        setOpenLines(openLines.filter((_, i) => i !== li));
+      } else {
+        pushUndo();
+        setOpenLines(openLines.map((line, i) => (i === li ? line.filter((_, j) => j !== pi) : line)));
+      }
+      setSelectedLinePoint(null);
+      setSelectedLine(null);
+      return;
+    }
     if (!selectedPoints.size) return;
     pushUndo();
     // Ако ЦЯЛА фигура (дупка/фигура, не външният контур) е избрана — трие се изцяло.
@@ -794,6 +980,34 @@ export default function EditorPage() {
     setPolyDraft([]);
   };
 
+  const insertLineMidpoint = (li: number, pi: number) => {
+    const line = openLines[li];
+    if (!line || pi >= line.length - 1) return;
+    const a = line[pi];
+    const b = line[pi + 1];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    pushUndo();
+    setOpenLines(openLines.map((l, i) => (i === li ? [...l.slice(0, pi + 1), mid, ...l.slice(pi + 1)] : l)));
+    setSelectedLinePoint({ li, pi: pi + 1 });
+  };
+
+  const deleteLineSpan = (li: number, pi: number) => {
+    const line = openLines[li];
+    if (!line) return;
+    pushUndo();
+    if (line.length <= 2) {
+      setOpenLines(openLines.filter((_, i) => i !== li));
+    } else {
+      setOpenLines(openLines.map((l, i) => (i === li ? l.filter((_, j) => j !== pi) : l)));
+    }
+    setSelectedLinePoint(null);
+  };
+
+  const reverseLine = (li: number) => {
+    pushUndo();
+    setOpenLines(openLines.map((l, i) => (i === li ? [...l].reverse() : l)));
+  };
+
   /**
    * Смяна на инструмента. Ако оставяш Полилиния с начертана чернова,
    * тя се завършва автоматично — така "чертая → ножица → режа" работи направо.
@@ -805,6 +1019,8 @@ export default function EditorPage() {
     } else if (tool === "polyline" && next !== "polyline") {
       setPolyDraft([]);
     }
+    if (tool === "arc" && next !== "arc") setArcDraft([]);
+    setNodeMenu(null);
     setTool(next);
   };
 
@@ -856,6 +1072,18 @@ export default function EditorPage() {
       setPolyDraft((draft) => [...draft, snapPt(p)]);
       return;
     }
+    if (tool === "arc") {
+      const next = [...arcDraft, snapPt(p)];
+      if (next.length >= 3) {
+        pushUndo();
+        const arc = arcFrom3Points(next[0], next[1], next[2]);
+        setContours((cur) => cur && { ...cur, polylines: [...(cur.polylines ?? []), arc] });
+        setArcDraft([]);
+      } else {
+        setArcDraft(next);
+      }
+      return;
+    }
     if (tool === "image") {
       dragRef.current = { kind: "image-move", start: p, startOff: { ...imgOffset } };
       return;
@@ -886,6 +1114,8 @@ export default function EditorPage() {
 
     const hit = hitPoint(p);
     if (hit) {
+      setSelectedLine(null);
+      setSelectedLinePoint(null);
       const key = pointKey(hit.ci, hit.pi);
       let sel = selectedPoints;
       if (e.shiftKey) {
@@ -904,6 +1134,24 @@ export default function EditorPage() {
       pushUndo();
       dragRef.current = { kind: "drag-selected", last: p, selection: sel };
     } else {
+      const linePoint = hitLinePoint(p);
+      if (linePoint) {
+        pushUndo();
+        setSelectedPoints(new Set());
+        setSelectedLine(linePoint.li);
+        setSelectedLinePoint(linePoint);
+        dragRef.current = { kind: "line-point", ...linePoint };
+        return;
+      }
+      const lineHit = hitOpenLine(p);
+      if (lineHit !== null) {
+        pushUndo();
+        setSelectedPoints(new Set());
+        setSelectedLine(lineHit);
+        setSelectedLinePoint(null);
+        dragRef.current = { kind: "line-move", li: lineHit, last: p };
+        return;
+      }
       // Ако вече има селекция: хващане върху линията или ВЪТРЕ в изцяло
       // избрана фигура мести цялата селекция свободно.
       if (selectedPoints.size) {
@@ -951,6 +1199,7 @@ export default function EditorPage() {
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (tool === "polyline" || tool === "arc") setHoverPt(snapPt(toImage(e)));
     const drag = dragRef.current;
     if (!drag) return;
     if (drag.kind === "pan") {
@@ -962,6 +1211,15 @@ export default function EditorPage() {
     } else if (drag.kind === "move-all") {
       const p = toImage(e);
       setContours(translateContourSet(drag.contours, p.x - drag.start.x, p.y - drag.start.y));
+    } else if (drag.kind === "line-point") {
+      const p = snapPt(toImage(e));
+      setOpenLines(openLines.map((line, li) => (li === drag.li ? line.map((q, pi) => (pi === drag.pi ? p : q)) : line)));
+    } else if (drag.kind === "line-move") {
+      const p = toImage(e);
+      const dx = p.x - drag.last.x;
+      const dy = p.y - drag.last.y;
+      setOpenLines(openLines.map((line, li) => (li === drag.li ? line.map((q) => ({ x: q.x + dx, y: q.y + dy })) : line)));
+      drag.last = p;
     } else if (drag.kind === "marquee") {
       const p = toImage(e);
       setMarquee((m) => (m ? { a: m.a, b: p } : m));
@@ -1050,8 +1308,33 @@ export default function EditorPage() {
       finishPolyline();
       return;
     }
+    if (tool === "arc") {
+      setArcDraft([]);
+      return;
+    }
     if (tool !== "select") return;
     const p = toImage(e);
+    const lineHit = hitOpenLine(p);
+    if (lineHit !== null) {
+      let best = { index: 0, dist: Infinity };
+      openLines[lineHit].forEach((_, i) => {
+        if (i >= openLines[lineHit].length - 1) return;
+        const dist = pointToSegment(p, openLines[lineHit][i], openLines[lineHit][i + 1]);
+        if (dist < best.dist) best = { index: i, dist };
+      });
+      if (best.dist <= 15 / view.scale) {
+        pushUndo();
+        setOpenLines(openLines.map((line, li) => {
+          if (li !== lineHit) return line;
+          const copy = [...line];
+          copy.splice(best.index + 1, 0, snapPt(p));
+          return copy;
+        }));
+        setSelectedLine(lineHit);
+        setSelectedLinePoint({ li: lineHit, pi: best.index + 1 });
+        return;
+      }
+    }
     let best = { ci: -1, index: 0, dist: Infinity };
     polys.forEach((poly, ci) => {
       const seg = nearestSegment(poly, p);
@@ -1070,7 +1353,21 @@ export default function EditorPage() {
 
   const onContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    deleteNearestPoint(toImage(e));
+    const p = toImage(e);
+    const lp = hitLinePoint(p);
+    if (lp) {
+      setSelectedLine(lp.li);
+      setSelectedLinePoint(lp);
+      setNodeMenu({ x: e.clientX, y: e.clientY, target: { type: "line", ...lp } });
+      return;
+    }
+    const hp = hitPoint(p);
+    if (hp) {
+      setSelectedPoints(new Set([pointKey(hp.ci, hp.pi)]));
+      setNodeMenu({ x: e.clientX, y: e.clientY, target: { type: "closed", ...hp } });
+      return;
+    }
+    deleteNearestPoint(p);
   };
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -1218,6 +1515,50 @@ export default function EditorPage() {
     toast(axis === "x" ? "Огледално по X" : "Огледално по Y");
   };
 
+  const mirrorToSide = (side: "left" | "right" | "top" | "bottom") => {
+    if (!contours) return;
+    const selectedContours = new Set<number>();
+    selectedPoints.forEach((key) => {
+      const [ci] = key.split(":").map(Number);
+      if (polys[ci]?.every((_, pi) => selectedPoints.has(pointKey(ci, pi)))) selectedContours.add(ci);
+    });
+    const sourceClosed = selectedContours.size ? [...selectedContours].map((ci) => polys[ci]).filter(Boolean) : polys;
+    const sourceOpen = selectedLine !== null && openLines[selectedLine] ? [openLines[selectedLine]] : openLines;
+    const allSource = [...sourceClosed, ...sourceOpen];
+    if (!allSource.length) return;
+    const b = boundsOf(allSource);
+    const gap = distanceToPx(mirrorGap);
+    const axis =
+      side === "right"
+        ? b.maxX + gap / 2
+        : side === "left"
+          ? b.minX - gap / 2
+          : side === "bottom"
+            ? b.maxY + gap / 2
+            : b.minY - gap / 2;
+    const reflect = (p: Pt): Pt =>
+      side === "right" || side === "left"
+        ? { x: 2 * axis - p.x, y: p.y }
+        : { x: p.x, y: 2 * axis - p.y };
+    const mirroredClosed = sourceClosed.map((poly) => poly.map(reflect));
+    const mirroredOpen = sourceOpen.map((line) => line.map(reflect));
+    pushUndo();
+    if (mirrorCopy) {
+      setContours({
+        ...contours,
+        inner: [...contours.inner, ...mirroredClosed],
+        polylines: [...(contours.polylines ?? []), ...mirroredOpen],
+      });
+    } else {
+      setContours({
+        outer: mirroredClosed[0] ?? contours.outer,
+        inner: mirroredClosed.length ? mirroredClosed.slice(1) : contours.inner,
+        polylines: mirroredOpen,
+      });
+    }
+    toast(mirrorCopy ? "Създадено е огледално копие" : "Формата е обърната огледално");
+  };
+
   const axisAlign = () => {
     if (!contours) return;
     const rect = minAreaRect(contours.outer);
@@ -1292,7 +1633,11 @@ export default function EditorPage() {
   redoRef.current = redo;
   escRef.current = () => {
     setSelectedPoints(new Set());
+    setSelectedLine(null);
+    setSelectedLinePoint(null);
+    setNodeMenu(null);
     setPolyDraft([]);
+    setArcDraft([]);
     setGhost(null);
   };
   fitRef.current = () => fitView(record);
@@ -1339,6 +1684,7 @@ export default function EditorPage() {
             <IconTool active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => switchTool("triangle")} />
             <IconTool active={tool === "square"} icon="square" label="Квадрат" onClick={() => switchTool("square")} />
             <IconTool active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => switchTool("polyline")} />
+            <IconTool active={tool === "arc"} icon="arc" label="Арка (3 точки)" onClick={() => switchTool("arc")} />
             <IconTool active={tool === "image"} icon="image" label="Снимка — мести/върти подложката" onClick={() => switchTool("image")} />
           </ToolGroup>
           <ToolGroup label="Стъпки">
@@ -1394,7 +1740,10 @@ export default function EditorPage() {
                 diameter={shapeDiameter}
                 unit={shapeUnit}
                 selectedCount={selectedCount}
+                selectedLine={selectedLine}
+                selectedLinePoint={selectedLinePoint}
                 polyCount={polyDraft.length}
+                arcCount={arcDraft.length}
                 moveDx={moveDx}
                 moveDy={moveDy}
                 pivot={pivot ?? contourCenter(contours)}
@@ -1413,6 +1762,7 @@ export default function EditorPage() {
                 onDeleteSelected={deleteSelectedPoints}
                 onFinishPolyline={finishPolyline}
                 onClearPolyline={() => setPolyDraft([])}
+                onClearArc={() => setArcDraft([])}
                 imgRotation={imgRotation}
                 onImgRotation={setImgRotation}
                 onImgReset={() => {
@@ -1493,6 +1843,29 @@ export default function EditorPage() {
                 </div>
               </Section>
 
+              <Section title="Mirror копие" hint="Копира формата огледално в избраната посока">
+                <div className="grid grid-cols-3 gap-2">
+                  <span />
+                  <ActionButton icon="arrowUp" label="Top" onClick={() => mirrorToSide("top")} />
+                  <span />
+                  <ActionButton icon="arrowLeft" label="Left" onClick={() => mirrorToSide("left")} />
+                  <ActionButton icon="mirrorX" label="Mirror" onClick={() => mirrorToSide("right")} />
+                  <ActionButton icon="arrowRight" label="Right" onClick={() => mirrorToSide("right")} />
+                  <span />
+                  <ActionButton icon="arrowDown" label="Bottom" onClick={() => mirrorToSide("bottom")} />
+                  <span />
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <ActionButton icon="mirrorX" label="Flip Horizontal" onClick={() => mirror("x")} />
+                  <ActionButton icon="mirrorY" label="Flip Vertical" onClick={() => mirror("y")} />
+                </div>
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={mirrorCopy} onChange={(e) => setMirrorCopy(e.target.checked)} />
+                  Създай огледално копие
+                </label>
+                <NumberRow label={`Разстояние (${shapeUnit})`} value={mirrorGap} step={0.5} min={0} onChange={setMirrorGap} />
+              </Section>
+
               <Section title="Мащаб" hint="Преоразмери целия чертеж">
                 <div className="mb-2 flex gap-3 text-sm">
                   <label className="flex items-center gap-1.5">
@@ -1531,6 +1904,49 @@ export default function EditorPage() {
           )}
         </div>
       </div>
+      {nodeMenu && (
+        <div
+          className="fixed z-[120] w-56 rounded-lg border border-paper-3 bg-paper p-1 text-sm shadow-xl dark:border-ink-3 dark:bg-ink-2"
+          style={{ left: nodeMenu.x, top: nodeMenu.y }}
+        >
+          <MenuItem label="to Line" hotkey="L" onClick={() => setNodeMenu(null)} />
+          <MenuItem label="to Arc" hotkey="A" onClick={() => {
+            const target = nodeMenu.target;
+            if (target.type === "line") {
+              const line = openLines[target.li];
+              if (line && target.pi > 0 && target.pi < line.length - 1) {
+                pushUndo();
+                const arc = arcFrom3Points(line[target.pi - 1], line[target.pi], line[target.pi + 1], 18);
+                setOpenLines(openLines.map((l, i) => i === target.li ? [...l.slice(0, target.pi - 1), ...arc, ...l.slice(target.pi + 2)] : l));
+              }
+            }
+            setNodeMenu(null);
+          }} />
+          <MenuItem label="Insert a Point" hotkey="I" onClick={() => {
+            if (nodeMenu.target.type === "line") insertLineMidpoint(nodeMenu.target.li, Math.max(0, nodeMenu.target.pi));
+            setNodeMenu(null);
+          }} />
+          <MenuItem label="Delete Span" hotkey="D" onClick={() => {
+            if (nodeMenu.target.type === "line") deleteLineSpan(nodeMenu.target.li, nodeMenu.target.pi);
+            else deleteSelectedPoints();
+            setNodeMenu(null);
+          }} />
+          <MenuItem label="Insert Midpoint" onClick={() => {
+            if (nodeMenu.target.type === "line") insertLineMidpoint(nodeMenu.target.li, Math.max(0, nodeMenu.target.pi));
+            setNodeMenu(null);
+          }} />
+          <MenuItem label="Reverse Direction" onClick={() => {
+            if (nodeMenu.target.type === "line") reverseLine(nodeMenu.target.li);
+            setNodeMenu(null);
+          }} />
+          <MenuItem label="Exit Node Edit Mode" hotkey="N" onClick={() => {
+            setNodeMenu(null);
+            setSelectedLine(null);
+            setSelectedLinePoint(null);
+            setSelectedPoints(new Set());
+          }} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1554,6 +1970,27 @@ function Section({
       {!hint && <div className="mb-2" />}
       {children}
     </section>
+  );
+}
+
+function MenuItem({
+  label,
+  hotkey,
+  onClick,
+}: {
+  label: string;
+  hotkey?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className="flex w-full items-center justify-between rounded px-3 py-2 text-left hover:bg-ink/5 dark:hover:bg-paper/10"
+      onClick={onClick}
+      type="button"
+    >
+      <span>{label}</span>
+      {hotkey && <span className="readout text-xs text-ink/45 dark:text-paper/45">{hotkey}</span>}
+    </button>
   );
 }
 
@@ -1598,7 +2035,10 @@ function ToolOptions({
   diameter,
   unit,
   selectedCount,
+  selectedLine,
+  selectedLinePoint,
   polyCount,
+  arcCount,
   moveDx,
   moveDy,
   pivot,
@@ -1617,6 +2057,7 @@ function ToolOptions({
   onDeleteSelected,
   onFinishPolyline,
   onClearPolyline,
+  onClearArc,
   imgRotation,
   onImgRotation,
   onImgReset,
@@ -1625,7 +2066,10 @@ function ToolOptions({
   diameter: number;
   unit: string;
   selectedCount: number;
+  selectedLine: number | null;
+  selectedLinePoint: { li: number; pi: number } | null;
   polyCount: number;
+  arcCount: number;
   moveDx: number;
   moveDy: number;
   pivot: Pt;
@@ -1644,6 +2088,7 @@ function ToolOptions({
   onDeleteSelected: () => void;
   onFinishPolyline: () => void;
   onClearPolyline: () => void;
+  onClearArc: () => void;
   imgRotation: number;
   onImgRotation: (v: number) => void;
   onImgReset: () => void;
@@ -1832,11 +2277,29 @@ function ToolOptions({
       {tool === "polyline" && (
         <div className="space-y-2">
           <p className="text-sm text-ink/65 dark:text-paper/65">Поставени точки: {polyCount}</p>
+          {selectedLine !== null && (
+            <p className="rounded-lg border border-paper-3 p-2 text-xs text-ink/65 dark:border-ink-3 dark:text-paper/65">
+              Избрана полилиния #{selectedLine + 1}
+              {selectedLinePoint ? `, точка ${selectedLinePoint.pi + 1}` : ""}. Влачи я за свободно местене или натисни Delete за триене.
+            </p>
+          )}
           <button className="btn-primary w-full" disabled={polyCount < 2} onClick={onFinishPolyline}>
             <Icon name="save" /> Завърши линията
           </button>
           <button className="btn-ghost w-full" disabled={!polyCount} onClick={onClearPolyline}>
             <Icon name="trash" /> Изчисти временната линия
+          </button>
+        </div>
+      )}
+
+      {tool === "arc" && (
+        <div className="space-y-2">
+          <p className="text-sm text-ink/65 dark:text-paper/65">
+            Арка: кликни 3 точки - начало, извивка и край.
+          </p>
+          <p className="readout text-xs text-ink/50 dark:text-paper/50">Поставени точки: {arcCount}/3</p>
+          <button className="btn-ghost w-full" disabled={!arcCount} onClick={onClearArc}>
+            <Icon name="trash" /> Изчисти арката
           </button>
         </div>
       )}
@@ -1968,6 +2431,7 @@ type IconName =
   | "triangle"
   | "square"
   | "polyline"
+  | "arc"
   | "smooth"
   | "simplify"
   | "undo"
@@ -1986,6 +2450,10 @@ type IconName =
   | "resample"
   | "mirrorX"
   | "mirrorY"
+  | "arrowUp"
+  | "arrowDown"
+  | "arrowLeft"
+  | "arrowRight"
   | "align"
   | "scale"
   | "offset"
@@ -2013,6 +2481,7 @@ function Icon({ name }: { name: IconName }) {
       {name === "triangle" && <path {...common} d="M12 4l8 15H4L12 4z" />}
       {name === "square" && <rect {...common} x="5" y="5" width="14" height="14" rx="1" />}
       {name === "polyline" && <path {...common} d="M4 17l5-8 5 5 6-9" />}
+      {name === "arc" && <path {...common} d="M5 17 Q12 4 19 17M5 17h0M12 8h0M19 17h0" />}
       {name === "smooth" && <path {...common} d="M4 15c4-8 8 8 16-2" />}
       {name === "simplify" && <path {...common} d="M4 18L10 6l4 8 6-8" />}
       {name === "undo" && <path {...common} d="M9 7H4v5M5 12a8 8 0 1 0 2-5" />}
@@ -2077,6 +2546,10 @@ function Icon({ name }: { name: IconName }) {
           <path {...common} d="M8 8l4-4 4 4M8 16l4 4 4-4" />
         </>
       )}
+      {name === "arrowUp" && <path {...common} d="M12 20V4M6 10l6-6 6 6" />}
+      {name === "arrowDown" && <path {...common} d="M12 4v16M6 14l6 6 6-6" />}
+      {name === "arrowLeft" && <path {...common} d="M20 12H4M10 6l-6 6 6 6" />}
+      {name === "arrowRight" && <path {...common} d="M4 12h16M14 6l6 6-6 6" />}
       {name === "align" && (
         <>
           <path {...common} d="M4 19h16" />
