@@ -11,9 +11,9 @@ export function toDXF(contours: ContourSet, mmPerPx: number, imageH: number): st
 
   push(0, "SECTION", 2, "HEADER", 9, "$ACADVER", 1, "AC1009", 0, "ENDSEC");
   push(0, "SECTION", 2, "TABLES", 0, "TABLE", 2, "LAYER", 70, 3);
-  push(0, "LAYER", 2, "OUTER", 70, 0, 62, 5, 6, "CONTINUOUS");
-  push(0, "LAYER", 2, "INNER", 70, 0, 62, 1, 6, "CONTINUOUS");
-  push(0, "LAYER", 2, "TOOLPATH", 70, 0, 62, 3, 6, "CONTINUOUS");
+  push(0, "LAYER", 2, "LINE", 70, 0, 62, 5, 6, "CONTINUOUS");
+  push(0, "LAYER", 2, "CUT", 70, 0, 62, 1, 6, "CONTINUOUS");
+  push(0, "LAYER", 2, "MARK", 70, 0, 62, 3, 6, "CONTINUOUS");
   push(0, "ENDTAB", 0, "ENDSEC");
   push(0, "SECTION", 2, "ENTITIES");
 
@@ -26,9 +26,9 @@ export function toDXF(contours: ContourSet, mmPerPx: number, imageH: number): st
     push(0, "SEQEND");
   };
 
-  writePolyline(toMm(contours.outer, mmPerPx, imageH), "OUTER", true);
-  for (const hole of contours.inner) writePolyline(toMm(hole, mmPerPx, imageH), "INNER", true);
-  for (const line of contours.polylines ?? []) writePolyline(toMm(line, mmPerPx, imageH), "TOOLPATH", false);
+  writePolyline(toMm(contours.outer, mmPerPx, imageH), "LINE", true);
+  for (const hole of contours.inner) writePolyline(toMm(hole, mmPerPx, imageH), "CUT", true);
+  for (const line of contours.polylines ?? []) writePolyline(toMm(line, mmPerPx, imageH), "MARK", false);
 
   push(0, "ENDSEC", 0, "EOF");
   return lines.join("\n");
