@@ -2304,9 +2304,13 @@ export default function EditorPage() {
   return (
     <div
       ref={pageRef}
-      className={`mx-auto max-w-[1760px] ${isFullscreen ? "h-screen overflow-y-auto bg-paper p-4 dark:bg-ink" : ""}`}
+      className={`mx-auto flex max-w-[1760px] flex-col ${
+        isFullscreen
+          ? "h-screen overflow-y-auto bg-paper p-4 dark:bg-ink xl:overflow-hidden"
+          : "xl:h-[calc(100vh-6rem)]"
+      }`}
     >
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-bold">{t.editorTitle}</h1>
           <p className="readout text-xs text-ink/50 dark:text-paper/50">
@@ -2325,7 +2329,7 @@ export default function EditorPage() {
       </div>
 
       {/* --- Горна лента с бързи действия --- */}
-      <div className="panel mb-3 flex flex-wrap items-center gap-1 p-1.5">
+      <div className="panel mb-3 flex shrink-0 flex-wrap items-center gap-1 p-1.5">
         <QuickBtn icon="undo" label="Назад" disabled={!undoStack.length} onClick={undo} />
         <QuickBtn icon="redo" label="Напред" disabled={!redoStack.length} onClick={redo} />
         <TopDivider />
@@ -2347,9 +2351,9 @@ export default function EditorPage() {
         <QuickBtn icon="fit" label="Центрирай" onClick={() => fitView(record)} />
       </div>
 
-      <div className="grid gap-3 xl:grid-cols-[104px_minmax(0,1fr)_340px]">
-        {/* --- Лява лента с инструменти (стил VCarve) --- */}
-        <div className="panel h-fit p-2 xl:sticky xl:top-3">
+      <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[104px_minmax(0,1fr)_340px]">
+        {/* --- Лява лента с инструменти (стил VCarve): собствен скрол --- */}
+        <div className="panel h-fit max-h-full p-2 xl:min-h-0 xl:overflow-y-auto">
           <ToolGroup label="Режим">
             <IconTool active={tool === "select"} icon="cursor" label="Избор / маркиране" onClick={() => switchTool("select")} />
             <IconTool active={tool === "move"} icon="move" label="Премести всичко" onClick={() => switchTool("move")} />
@@ -2399,10 +2403,10 @@ export default function EditorPage() {
             />
           </ToolGroup>
         </div>
-        <div className="min-w-0">
+        <div className="flex min-h-0 min-w-0 flex-col">
           <div
             ref={wrapRef}
-            className="panel graticule relative h-[72vh] min-h-[560px] touch-none overflow-hidden p-0"
+            className="panel graticule relative h-[70vh] min-h-[420px] touch-none overflow-hidden p-0 xl:h-auto xl:min-h-0 xl:flex-1"
           >
             <canvas
               ref={canvasRef}
@@ -2416,7 +2420,7 @@ export default function EditorPage() {
             />
           </div>
           {/* --- Статус лента --- */}
-          <div className="panel mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-1.5 text-xs text-ink/60 dark:text-paper/60">
+          <div className="panel mt-2 flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-1.5 text-xs text-ink/60 dark:text-paper/60">
             <span className="readout">
               Инструмент: <strong className="text-ink/80 dark:text-paper/80">{TOOL_LABELS[tool]}</strong>
             </span>
@@ -2429,7 +2433,8 @@ export default function EditorPage() {
           </div>
         </div>
 
-        <div className="max-h-[85vh] overflow-y-auto pr-1">
+        {/* --- Десен панел: собствен скрол --- */}
+        <div className="min-h-0 max-h-[85vh] overflow-y-auto pr-1 xl:max-h-none">
           {/* --- Табове: всичко на едно място --- */}
           <div className="panel sticky top-0 z-10 mb-3 grid grid-cols-4 gap-1 p-1 opacity-95">
             <TabButton active={panelTab === "tool"} icon="cursor" label="Инструмент" onClick={() => setPanelTab("tool")} />
