@@ -1961,6 +1961,54 @@ export default function EditorPage() {
       : [...rest, ...exteriors, ...holes];
   };
 
+  /**
+   * Прилепя фигури автоматично: местената фигура се транслира така, че
+   * НАЙ-БЛИЗКАТА двойка точки (нейна ↔ на другата фигура) да съвпадне точно.
+   * Без селекция при две фигури прилепва втората към основната; с избрана
+   * фигура — нея към най-близката; с няколко избрани — към най-голямата.
+   */
+  const autoSnapFigures = () => {
+    if (polys.length < 2) return toast("Нужни са поне две фигури", "err");
+    const selected = fullySelectedContours;
+    let movers: number[];
+    let anchors: number[];
+    if (selected.length >= 2) {
+      const sorted = [...selected].sort((a, b) => polygonArea(polys[b]) - polygonArea(polys[a]));
+      anchors = [sorted[0]];
+      movers = sorted.slice(1);
+    } else if (selected.length === 1) {
+      movers = selected;
+      anchors = polys.map((_, ci) => ci).filter((ci) => ci !== selected[0]);
+    } else if (polys.length === 2) {
+      movers = [1];
+      anchors = [0];
+    } else {
+      return toast("Избери фигурата, която да прилепне (клик върху линията ѝ)", "err");
+    }
+    pushUndo();
+    const next = polys.map((poly) => poly.map((q) => ({ ...q })));
+    const anchorSet = new Set(anchors);
+    for (const mi of movers) {
+      const anchorPts = next.filter((_, ci) => anchorSet.has(ci)).flat();
+      let best: { dx: number; dy: number; d: number } | null = null;
+      for (const m of next[mi]) {
+        for (const a of anchorPts) {
+          const d = Math.hypot(a.x - m.x, a.y - m.y);
+          if (!best || d < best.d) best = { dx: a.x - m.x, dy: a.y - m.y, d };
+        }
+      }
+      if (!best) continue;
+      const { dx, dy } = best;
+      next[mi] = next[mi].map((q) => ({ x: q.x + dx, y: q.y + dy }));
+      // Следващите движещи се фигури прилепват и към вече прилепените.
+      anchorSet.add(mi);
+    }
+    setPolys(next);
+    setSelectedPoints(new Set());
+    setBezierNode(null);
+    toast("Фигурите са прилепени по най-близките точки");
+  };
+
   /** Обединява изцяло избраните фигури (≥2) в една обща. */
   const mergeSelectedContours = () => {
     const targets = fullySelectedContours;
@@ -2210,6 +2258,7 @@ export default function EditorPage() {
             <IconTool icon="arrowUp" label="Mirror/прилепи нагоре" onClick={() => mirrorToSide("top")} />
             <IconTool icon="arrowDown" label="Mirror/прилепи надолу" onClick={() => mirrorToSide("bottom")} />
             <IconTool active={snapObjects} icon="magnet" label="Магнит — при влачене фигурата прилепва точка към точка към другите" onClick={() => setSnapObjects(!snapObjects)} />
+            <IconTool icon="snapAuto" label="Прилепи автоматично — премества фигурата до най-близката друга (най-близки точки)" disabled={polys.length < 2} onClick={autoSnapFigures} />
             <IconTool icon="weld" label="Обедини избраните фигури в една" disabled={fullySelectedContours.length < 2} onClick={mergeSelectedContours} />
           </ToolGroup>
           <ToolGroup label="Изглед" last>
@@ -2299,11 +2348,12 @@ export default function EditorPage() {
                   <ActionButton icon="contour" label="Целия контур" disabled={!selectedCount} onClick={selectWholeContour} />
                   <ActionButton icon="trash" label="Изтрий точките" disabled={!selectedCount} onClick={deleteSelectedPoints} />
                 </div>
-                <div className="mt-2">
-                  <ActionButton icon="weld" label="Обедини избраните фигури в една" wide disabled={fullySelectedContours.length < 2} onClick={mergeSelectedContours} />
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <ActionButton icon="snapAuto" label="Прилепи автоматично (най-близки точки)" disabled={polys.length < 2} onClick={autoSnapFigures} />
+                  <ActionButton icon="weld" label="Обедини избраните фигури в една" disabled={fullySelectedContours.length < 2} onClick={mergeSelectedContours} />
                 </div>
                 <p className="mt-1 text-xs text-ink/45 dark:text-paper/45">
-                  Клик върху линията на фигура я избира цялата, Shift+клик добавя втора. Допрени или застъпени фигури стават една обща.
+                  „Прилепи автоматично“ мести фигурата до най-близката друга, докато най-близките им точки се допрат (при 2 фигури не е нужна селекция). Клик върху линията на фигура я избира цялата, Shift+клик добавя втора. Допрени или застъпени фигури се обединяват в една обща.
                 </p>
                 <div className="mt-2">
                   <ActionButton icon="trash" label="Изтрий целия контур (дупка/фигура)" danger wide disabled={!selectedCount} onClick={deleteWholeContour} />
@@ -3024,6 +3074,7 @@ type IconName =
   | "arrowRight"
   | "align"
   | "weld"
+  | "snapAuto"
   | "scale"
   | "offset"
   | "fullscreen"
@@ -3119,6 +3170,13 @@ function Icon({ name }: { name: IconName }) {
         <>
           <path {...common} d="M14.8 7.2a5.5 5.5 0 1 0 0 9.6" />
           <path {...common} d="M9.2 7.2a5.5 5.5 0 1 1 0 9.6" />
+        </>
+      )}
+      {name === "snapAuto" && (
+        <>
+          <rect {...common} x="3" y="8" width="8" height="8" rx="1" />
+          <rect {...common} x="15" y="8" width="6" height="8" rx="1" strokeDasharray="3 2" />
+          <path {...common} d="M11 12h4M13.2 10.2 15 12l-1.8 1.8" />
         </>
       )}
       {name === "arrowUp" && <path {...common} d="M12 20V4M6 10l6-6 6 6" />}
