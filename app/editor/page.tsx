@@ -2324,6 +2324,29 @@ export default function EditorPage() {
         </div>
       </div>
 
+      {/* --- Горна лента с бързи действия --- */}
+      <div className="panel mb-3 flex flex-wrap items-center gap-1 p-1.5">
+        <QuickBtn icon="undo" label="Назад" disabled={!undoStack.length} onClick={undo} />
+        <QuickBtn icon="redo" label="Напред" disabled={!redoStack.length} onClick={redo} />
+        <TopDivider />
+        <QuickBtn icon="selectAll" label="Всички" onClick={selectAllPoints} />
+        <QuickBtn icon="deselect" label="Изчисти" disabled={!selectedCount} onClick={() => setSelectedPoints(new Set())} />
+        <QuickBtn icon="contour" label="Целия контур" disabled={!selectedCount} onClick={selectWholeContour} />
+        <QuickBtn icon="trash" label="Изтрий" disabled={!selectedCount && selectedLine === null && !selectedLinePoint} onClick={deleteSelectedPoints} />
+        <TopDivider />
+        <QuickBtn icon="snapAuto" label="Прилепи" disabled={polys.length < 2} onClick={autoSnapFigures} />
+        <QuickBtn icon="weld" label="Обедини" disabled={fullySelectedContours.length < 2} onClick={mergeSelectedContours} />
+        <TopDivider />
+        <QuickBtn icon="arrowLeft" label="Mirror ляво" onClick={() => mirrorToSide("left")} />
+        <QuickBtn icon="arrowRight" label="Mirror дясно" onClick={() => mirrorToSide("right")} />
+        <QuickBtn icon="arrowUp" label="Mirror горе" onClick={() => mirrorToSide("top")} />
+        <QuickBtn icon="arrowDown" label="Mirror долу" onClick={() => mirrorToSide("bottom")} />
+        <TopDivider />
+        <QuickBtn icon="grid" label="Мрежа" active={grid} onClick={() => setGrid(!grid)} />
+        <QuickBtn icon="magnet" label="Магнит" active={snapObjects} onClick={() => setSnapObjects(!snapObjects)} />
+        <QuickBtn icon="fit" label="Центрирай" onClick={() => fitView(record)} />
+      </div>
+
       <div className="grid gap-3 xl:grid-cols-[104px_minmax(0,1fr)_340px]">
         {/* --- Лява лента с инструменти (стил VCarve) --- */}
         <div className="panel h-fit p-2 xl:sticky xl:top-3">
@@ -2331,17 +2354,19 @@ export default function EditorPage() {
             <IconTool active={tool === "select"} icon="cursor" label="Избор / маркиране" onClick={() => switchTool("select")} />
             <IconTool active={tool === "move"} icon="move" label="Премести всичко" onClick={() => switchTool("move")} />
             <IconTool active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => switchTool("rotate")} />
-            <IconTool active={tool === "delete"} icon="trash" label="Изтриване на точки" onClick={() => switchTool("delete")} />
-            <IconTool active={tool === "scissors"} icon="scissors" label="Ножица — клик върху линия я изтрива" onClick={() => switchTool("scissors")} />
-            <IconTool active={tool === "fillet"} icon="fillet" label="Заобляне на ъгли — клик върху ъгъл (Normal / Dog-Bone / T-Bone / Плазма)" onClick={() => switchTool("fillet")} />
+            <IconTool active={tool === "image"} icon="image" label="Снимка — мести/върти подложката" onClick={() => switchTool("image")} />
           </ToolGroup>
-          <ToolGroup label="Фигури">
+          <ToolGroup label="Чертане">
             <IconTool active={tool === "circle"} icon="circle" label="Кръг" onClick={() => switchTool("circle")} />
             <IconTool active={tool === "triangle"} icon="triangle" label="Триъгълник" onClick={() => switchTool("triangle")} />
             <IconTool active={tool === "square"} icon="square" label="Квадрат" onClick={() => switchTool("square")} />
-            <IconTool active={tool === "polyline"} icon="polyline" label="Полилиния" onClick={() => switchTool("polyline")} />
+            <IconTool active={tool === "polyline"} icon="polyline" label="Полилиния (Shift = 0°/45°/90°)" onClick={() => switchTool("polyline")} />
             <IconTool active={tool === "arc"} icon="arc" label="Арка (3 точки)" onClick={() => switchTool("arc")} />
-            <IconTool active={tool === "image"} icon="image" label="Снимка — мести/върти подложката" onClick={() => switchTool("image")} />
+          </ToolGroup>
+          <ToolGroup label="Редакция">
+            <IconTool active={tool === "delete"} icon="trash" label="Изтриване на точки" onClick={() => switchTool("delete")} />
+            <IconTool active={tool === "scissors"} icon="scissors" label="Ножица — клик върху линия я изтрива" onClick={() => switchTool("scissors")} />
+            <IconTool active={tool === "fillet"} icon="fillet" label="Заобляне на ъгли — клик върху ъгъл (Normal / Dog-Bone / T-Bone / Плазма)" onClick={() => switchTool("fillet")} />
           </ToolGroup>
           <ToolGroup label="Стъпки">
             <IconTool icon="undo" label="Назад (Undo)" disabled={!undoStack.length} onClick={undo} />
@@ -2377,7 +2402,7 @@ export default function EditorPage() {
         <div className="min-w-0">
           <div
             ref={wrapRef}
-            className="panel graticule relative h-[78vh] min-h-[620px] touch-none overflow-hidden p-0"
+            className="panel graticule relative h-[72vh] min-h-[560px] touch-none overflow-hidden p-0"
           >
             <canvas
               ref={canvasRef}
@@ -2389,6 +2414,18 @@ export default function EditorPage() {
               onContextMenu={onContextMenu}
               onWheel={onWheel}
             />
+          </div>
+          {/* --- Статус лента --- */}
+          <div className="panel mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-1.5 text-xs text-ink/60 dark:text-paper/60">
+            <span className="readout">
+              Инструмент: <strong className="text-ink/80 dark:text-paper/80">{TOOL_LABELS[tool]}</strong>
+            </span>
+            <span className="readout">
+              Точки: {polys.reduce((s, q) => s + q.length, 0)} · Избрани: {selectedCount} · Фигури: {polys.length} · Линии: {openLines.length}
+            </span>
+            <span className="readout">
+              Zoom: {(view.scale * 100).toFixed(0)}% · Единици: {shapeUnit} · Магнит: {snapObjects ? "вкл" : "изкл"}
+            </span>
           </div>
         </div>
 
@@ -3083,6 +3120,58 @@ function ToolOptions({
       )}
     </section>
   );
+}
+
+const TOOL_LABELS: Record<ToolMode, string> = {
+  select: "Избор / маркиране",
+  move: "Премести всичко",
+  rotate: "Завърти",
+  delete: "Изтриване на точки",
+  scissors: "Ножица",
+  fillet: "Заобляне на ъгли",
+  circle: "Кръг",
+  triangle: "Триъгълник",
+  square: "Квадрат",
+  polyline: "Полилиния",
+  arc: "Арка",
+  image: "Снимка (подложка)",
+};
+
+/** Бутон от горната лента: икона + кратък надпис, с tooltip. */
+function QuickBtn({
+  icon,
+  label,
+  active,
+  disabled,
+  onClick,
+}: {
+  icon: IconName;
+  label: string;
+  active?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        active
+          ? "border-dye bg-dye text-white dark:border-dye-bright dark:bg-dye-bright dark:text-ink"
+          : "border-paper-3 bg-paper-2 hover:bg-ink/5 dark:border-ink-3 dark:bg-ink-2 dark:hover:bg-paper/5"
+      }`}
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+      type="button"
+    >
+      <Icon name={icon} />
+      <span className="hidden lg:inline">{label}</span>
+    </button>
+  );
+}
+
+/** Тънък разделител между групите в горната лента. */
+function TopDivider() {
+  return <span className="mx-1 h-6 w-px shrink-0 bg-paper-3 dark:bg-ink-3" aria-hidden />;
 }
 
 /** Таб в обединения десен панел. */
