@@ -23,6 +23,7 @@ import {
   smoothIndices,
   straighten,
 } from "@/lib/geometry";
+import { unionShapes } from "@/lib/boolean";
 import MeasurementsPanel from "@/components/MeasurementsPanel";
 import ExportButtons from "@/components/ExportButtons";
 import type { ContourSet, Pt, ScanRecord } from "@/lib/types";
@@ -48,7 +49,8 @@ type ToolMode =
   | "image";
 
 type DragState =
-  | { kind: "drag-selected"; last: Pt; selection: Set<string> }
+  | { kind: "drag-selected"; start: Pt; base: Pt[][]; selection: Set<string> }
+  | { kind: "draft-point"; pi: number }
   | { kind: "marquee"; additive: boolean }
   | { kind: "move-all"; start: Pt; contours: ContourSet }
   | { kind: "line-point"; li: number; pi: number }
@@ -211,6 +213,10 @@ export default function EditorPage() {
   const [scaleTargetWidth, setScaleTargetWidth] = useState(100);
   const [mirrorCopy, setMirrorCopy] = useState(true);
   const [mirrorGap, setMirrorGap] = useState(0);
+  // Обединяване на огледалното копие с оригинала в една фигура (заваряване).
+  const [mirrorWeld, setMirrorWeld] = useState(false);
+  // Магнит: при влачене на фигура/точка тя прилепва точка-към-точка към другите.
+  const [snapObjects, setSnapObjects] = useState(true);
   const [smoothStrength, setSmoothStrength] = useState(settings.smoothing);
   const [simplifyEps, setSimplifyEps] = useState(2);
 
@@ -277,6 +283,14 @@ export default function EditorPage() {
   const polys = useMemo(() => (contours ? [contours.outer, ...contours.inner] : []), [contours]);
   const openLines = useMemo(() => contours?.polylines ?? [], [contours]);
   const selectedCount = selectedPoints.size;
+  // Индекси на изцяло избрани фигури (всички точки на фигурата са в селекцията).
+  const fullySelectedContours = useMemo(() => {
+    const out: number[] = [];
+    polys.forEach((poly, ci) => {
+      if (poly.length && poly.every((_, pi) => selectedPoints.has(pointKey(ci, pi)))) out.push(ci);
+    });
+    return out;
+  }, [polys, selectedPoints]);
   const pxToUnit = useCallback(
     (value: number) => {
       const k = record?.calibration?.mmPerPx;
@@ -821,6 +835,8 @@ export default function EditorPage() {
   const redoRef = useRef<() => void>(() => {});
   const escRef = useRef<() => void>(() => {});
   const fitRef = useRef<() => void>(() => {});
+  // При чертане на полилиния Delete/Backspace маха последната поставена точка.
+  const draftPopRef = useRef<() => boolean>(() => false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = document.activeElement;
@@ -835,7 +851,7 @@ export default function EditorPage() {
         redoRef.current();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
-        deleteSelectedRef.current();
+        if (!draftPopRef.current()) deleteSelectedRef.current();
       } else if (e.key === "Escape") {
         escRef.current();
       } else if (!mod && (e.key === "f" || e.key === "F")) {
@@ -1051,6 +1067,28 @@ export default function EditorPage() {
     // на мястото на кликнатия участък (нова форма).
     if (spliceContourWithPolyline(best.idx, p)) return;
 
+    // Клик върху ОБЩИЯ ръб на две допрени фигури: ръбът се изрязва и двете
+    // стават една обща фигура.
+    {
+      const shareTol = 12 / view.scale;
+      let partner = { ci: -1, dist: Infinity };
+      polys.forEach((poly, ci) => {
+        if (ci === best.idx) return;
+        const seg = nearestSegment(poly, p);
+        if (seg.dist < partner.dist) partner = { ci, dist: seg.dist };
+      });
+      if (partner.ci !== -1 && partner.dist <= shareTol) {
+        const merged = unionShapes([polys[best.idx], polys[partner.ci]], weldTolPx());
+        if (merged && merged.length === 1) {
+          pushUndo();
+          setPolys(rebuildAfterUnion(new Set([best.idx, partner.ci]), merged));
+          setSelectedPoints(new Set());
+          toast("Общият ръб е изрязан — фигурите са обединени в една");
+          return;
+        }
+      }
+    }
+
     if (best.idx === 0) {
       // Външният контур: заменяме го с най-голямата вътрешна фигура, ако има такава.
       if (!contours || contours.inner.length === 0) {
@@ -1228,6 +1266,41 @@ export default function EditorPage() {
     setTool(next);
   };
 
+  /** Снимка на всички фигури в началото на влачене (за стабилно местене без дрейф). */
+  const basePolys = () => polys.map((poly) => poly.map((q) => ({ ...q })));
+
+  /**
+   * Магнитно прилепяне точка-към-точка: най-близката двойка (местена точка,
+   * неподвижна точка) в допуска дава корекция на делтата, така че фигурите
+   * да се долепят точно една за друга.
+   */
+  const objectSnapCorrection = (
+    moving: Pt[],
+    statics: Pt[],
+    tol: number
+  ): { dx: number; dy: number } | null => {
+    let best: { dx: number; dy: number; d: number } | null = null;
+    for (const m of moving) {
+      for (const s of statics) {
+        const d = Math.hypot(s.x - m.x, s.y - m.y);
+        if (d <= tol && (!best || d < best.d)) best = { dx: s.x - m.x, dy: s.y - m.y, d };
+      }
+    }
+    return best;
+  };
+
+  /** Неподвижни точки-магнити: точките извън селекцията + отворените линии. */
+  const staticSnapPoints = (base: Pt[][], selection: Set<string>): Pt[] => {
+    const out: Pt[] = [];
+    base.forEach((poly, ci) =>
+      poly.forEach((q, pi) => {
+        if (!selection.has(pointKey(ci, pi))) out.push(q);
+      })
+    );
+    openLines.forEach((line) => out.push(...line));
+    return out;
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button === 2) return;
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -1273,6 +1346,14 @@ export default function EditorPage() {
       return;
     }
     if (tool === "polyline") {
+      // Клик върху вече поставена точка от черновата я хваща за местене,
+      // вместо да добавя нова — така линията се оправя още докато се чертае.
+      const tolDraft = 11 / view.scale;
+      const di = polyDraft.findIndex((q) => Math.hypot(q.x - p.x, q.y - p.y) <= tolDraft);
+      if (di !== -1) {
+        dragRef.current = { kind: "draft-point", pi: di };
+        return;
+      }
       setPolyDraft((draft) => [...draft, snapPt(p)]);
       return;
     }
@@ -1357,7 +1438,7 @@ export default function EditorPage() {
       }
       // Drag: точката (или цялата селекция, ако е част от нея) се мести заедно.
       pushUndo();
-      dragRef.current = { kind: "drag-selected", last: p, selection: sel };
+      dragRef.current = { kind: "drag-selected", start: p, base: basePolys(), selection: sel };
     } else {
       const linePoint = hitLinePoint(p);
       if (linePoint) {
@@ -1397,7 +1478,7 @@ export default function EditorPage() {
         }
         if (grab) {
           pushUndo();
-          dragRef.current = { kind: "drag-selected", last: p, selection: new Set(selectedPoints) };
+          dragRef.current = { kind: "drag-selected", start: p, base: basePolys(), selection: new Set(selectedPoints) };
           return;
         }
       }
@@ -1414,7 +1495,7 @@ export default function EditorPage() {
         setSelectedPoints(sel);
         // Влаченето мести цялата избрана фигура.
         pushUndo();
-        dragRef.current = { kind: "drag-selected", last: p, selection: sel };
+        dragRef.current = { kind: "drag-selected", start: p, base: basePolys(), selection: sel };
         return;
       }
       // Празно място: рисуваме правоъгълник за селекция (marquee).
@@ -1425,7 +1506,7 @@ export default function EditorPage() {
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (tool === "polyline" || tool === "arc") setHoverPt(snapPt(toImage(e)));
+    if ((tool === "polyline" || tool === "arc") && !dragRef.current) setHoverPt(snapPt(toImage(e)));
     const drag = dragRef.current;
     if (!drag) return;
     if (drag.kind === "pan") {
@@ -1438,7 +1519,16 @@ export default function EditorPage() {
       const p = toImage(e);
       setContours(translateContourSet(drag.contours, p.x - drag.start.x, p.y - drag.start.y));
     } else if (drag.kind === "line-point") {
-      const p = snapPt(toImage(e));
+      let p = snapPt(toImage(e));
+      if (snapObjects) {
+        // Магнит: точката на линията прилепва към точки на фигурите и на другите линии.
+        const statics: Pt[] = polys.flat();
+        openLines.forEach((line, li) => {
+          if (li !== drag.li) statics.push(...line);
+        });
+        const adj = objectSnapCorrection([p], statics, 10 / view.scale);
+        if (adj) p = { x: p.x + adj.dx, y: p.y + adj.dy };
+      }
       setOpenLines(openLines.map((line, li) => (li === drag.li ? line.map((q, pi) => (pi === drag.pi ? p : q)) : line)));
     } else if (drag.kind === "line-move") {
       const p = toImage(e);
@@ -1495,6 +1585,15 @@ export default function EditorPage() {
         }));
         setSelectedLinePoint({ li: drag.li, pi: drag.side === "prev" ? drag.pi + 5 : drag.pi + 6 });
       }
+    } else if (drag.kind === "draft-point") {
+      // Местене на точка от чертаната (незавършена) полилиния.
+      let q = snapPt(toImage(e));
+      if (snapObjects) {
+        const statics: Pt[] = [...polys.flat(), ...openLines.flat()];
+        const adj = objectSnapCorrection([q], statics, 10 / view.scale);
+        if (adj) q = { x: q.x + adj.dx, y: q.y + adj.dy };
+      }
+      setPolyDraft((draft) => draft.map((pt, i) => (i === drag.pi ? q : pt)));
     } else if (drag.kind === "marquee") {
       const p = toImage(e);
       setMarquee((m) => (m ? { a: m.a, b: p } : m));
@@ -1509,29 +1608,47 @@ export default function EditorPage() {
       });
     } else if (drag.kind === "drag-selected") {
       const p = toImage(e);
+      const tol = 10 / view.scale;
       if (drag.selection.size === 1) {
-        // Единична точка: прилепва към мрежата при включен snap.
+        // Единична точка: прилепва към мрежата и (с магнита) към чужди точки.
         const key = [...drag.selection][0];
         const [ci, pi] = key.split(":").map(Number);
-        const target = snapPt(p);
+        let target = snapPt(p);
+        if (snapObjects) {
+          const adj = objectSnapCorrection([target], staticSnapPoints(drag.base, drag.selection), tol);
+          if (adj) target = { x: target.x + adj.dx, y: target.y + adj.dy };
+        }
         setPolys(
-          polys.map((poly, i) =>
+          drag.base.map((poly, i) =>
             i === ci ? poly.map((q, j) => (j === pi ? target : q)) : poly
           )
         );
       } else {
-        // Групово местене: всички избрани точки се движат с делтата.
-        const dx = p.x - drag.last.x;
-        const dy = p.y - drag.last.y;
+        // Групово местене: делта от началото на влаченето върху базовата
+        // снимка + магнитно прилепяне на фигурата към съседните точки.
+        let dx = p.x - drag.start.x;
+        let dy = p.y - drag.start.y;
+        if (snapObjects) {
+          const moving: Pt[] = [];
+          drag.base.forEach((poly, ci) =>
+            poly.forEach((q, pi) => {
+              if (drag.selection.has(pointKey(ci, pi))) moving.push({ x: q.x + dx, y: q.y + dy });
+            })
+          );
+          const adj = objectSnapCorrection(moving, staticSnapPoints(drag.base, drag.selection), tol);
+          if (adj) {
+            dx += adj.dx;
+            dy += adj.dy;
+          }
+        }
         setPolys(
-          polys.map((poly, ci) =>
+          drag.base.map((poly, ci) =>
             poly.map((q, pi) =>
               drag.selection.has(pointKey(ci, pi)) ? { x: q.x + dx, y: q.y + dy } : q
             )
           )
         );
       }
-      drag.last = p;
     }
   };
 
@@ -1820,6 +1937,53 @@ export default function EditorPage() {
     toast(`Точките са преразпределени на ${resampleStep} ${shapeUnitLabel()}`);
   };
 
+  /* --------------------- обединяване на фигури (union) --------------------- */
+
+  /** Допуск за заваряване на почти съвпадащи точки при обединение. */
+  const weldTolPx = () => Math.max(1.5, distanceToPx(0.2));
+
+  /**
+   * Сглобява новия списък от фигури след обединение: фигурите с индекси от
+   * mergedIdx се заменят с резултата. Ако е участвал външният контур (0),
+   * най-голямата получена фигура става новият външен контур.
+   */
+  const rebuildAfterUnion = (
+    mergedIdx: Set<number>,
+    merged: { exterior: Pt[]; holes: Pt[][] }[]
+  ): Pt[][] => {
+    const exteriors = merged
+      .map((m) => m.exterior)
+      .sort((a, b) => polygonArea(b) - polygonArea(a));
+    const holes = merged.flatMap((m) => m.holes);
+    const rest = polys.filter((_, ci) => !mergedIdx.has(ci));
+    return mergedIdx.has(0)
+      ? [exteriors[0], ...rest, ...exteriors.slice(1), ...holes]
+      : [...rest, ...exteriors, ...holes];
+  };
+
+  /** Обединява изцяло избраните фигури (≥2) в една обща. */
+  const mergeSelectedContours = () => {
+    const targets = fullySelectedContours;
+    if (targets.length < 2)
+      return toast(
+        "Избери поне две цели фигури: клик върху линията на фигурата, Shift+клик за следващата",
+        "err"
+      );
+    const shapes = targets.map((ci) => polys[ci]);
+    const merged = unionShapes(shapes, weldTolPx());
+    if (!merged) return toast("Обединението не успя — фигурите са невалидни", "err");
+    if (merged.length >= shapes.length)
+      return toast(
+        "Фигурите не се допират — прилепи ги първо (влаченето с магнита ги залепя точка към точка)",
+        "err"
+      );
+    pushUndo();
+    setPolys(rebuildAfterUnion(new Set(targets), merged));
+    setSelectedPoints(new Set());
+    setBezierNode(null);
+    toast("Фигурите са обединени в една");
+  };
+
   const mirror = (axis: "x" | "y") => {
     if (!contours) return;
     pushUndo();
@@ -1861,6 +2025,25 @@ export default function EditorPage() {
     const mirroredOpen = sourceOpen.map((line) => line.map(reflect));
     pushUndo();
     if (mirrorCopy) {
+      // Заваряване: копието и оригиналът стават ЕДНА фигура (ако се допират).
+      if (mirrorWeld && mirroredClosed.length) {
+        const srcIdx = new Set<number>(
+          selectedContours.size ? [...selectedContours] : polys.map((_, i) => i)
+        );
+        const merged = unionShapes([...sourceClosed, ...mirroredClosed], weldTolPx());
+        if (merged && merged.length < sourceClosed.length + mirroredClosed.length) {
+          const next = rebuildAfterUnion(srcIdx, merged);
+          setContours({
+            outer: next[0],
+            inner: next.slice(1),
+            polylines: [...(contours.polylines ?? []), ...mirroredOpen],
+          });
+          setSelectedPoints(new Set());
+          toast("Огледалното копие е обединено с оригинала в една фигура");
+          return;
+        }
+        toast("Фигурите не се допират (разстояние > 0) — създадено е отделно копие");
+      }
       setContours({
         ...contours,
         inner: [...contours.inner, ...mirroredClosed],
@@ -1948,6 +2131,11 @@ export default function EditorPage() {
   // Актуализираме ref-овете за клавишните комбинации на всеки render.
   undoRef.current = undo;
   redoRef.current = redo;
+  draftPopRef.current = () => {
+    if (tool !== "polyline" || !polyDraft.length) return false;
+    setPolyDraft((d) => d.slice(0, -1));
+    return true;
+  };
   escRef.current = () => {
     setSelectedPoints(new Set());
     setSelectedLine(null);
@@ -2021,6 +2209,8 @@ export default function EditorPage() {
             <IconTool icon="arrowRight" label="Mirror/прилепи надясно" onClick={() => mirrorToSide("right")} />
             <IconTool icon="arrowUp" label="Mirror/прилепи нагоре" onClick={() => mirrorToSide("top")} />
             <IconTool icon="arrowDown" label="Mirror/прилепи надолу" onClick={() => mirrorToSide("bottom")} />
+            <IconTool active={snapObjects} icon="magnet" label="Магнит — при влачене фигурата прилепва точка към точка към другите" onClick={() => setSnapObjects(!snapObjects)} />
+            <IconTool icon="weld" label="Обедини избраните фигури в една" disabled={fullySelectedContours.length < 2} onClick={mergeSelectedContours} />
           </ToolGroup>
           <ToolGroup label="Изглед" last>
             <IconTool active={grid} icon="grid" label="Мрежа" onClick={() => setGrid(!grid)} />
@@ -2051,7 +2241,7 @@ export default function EditorPage() {
             />
           </div>
           <p className="mt-2 text-xs text-ink/50 dark:text-paper/50">
-            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. Клик върху точка показва сини дръжки (пен-тул): дръпни дръжка, за да огънеш линията в крива. При изцяло избрана фигура: хвани я откъдето и да е (вкл. отвътре) и я влачи свободно. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
+            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. Клик върху точка показва сини дръжки (пен-тул): дръпни дръжка, за да огънеш линията в крива. При изцяло избрана фигура: хвани я откъдето и да е (вкл. отвътре) и я влачи свободно — с включения магнит тя прилепва точка към точка към другите фигури. Две прилепени/застъпени фигури се сливат с бутона „Обедини“ или с Ножица върху общия им ръб. Полилиния: клик върху вече поставена точка я мести; Delete маха последната. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
           </p>
         </div>
 
@@ -2109,6 +2299,12 @@ export default function EditorPage() {
                   <ActionButton icon="contour" label="Целия контур" disabled={!selectedCount} onClick={selectWholeContour} />
                   <ActionButton icon="trash" label="Изтрий точките" disabled={!selectedCount} onClick={deleteSelectedPoints} />
                 </div>
+                <div className="mt-2">
+                  <ActionButton icon="weld" label="Обедини избраните фигури в една" wide disabled={fullySelectedContours.length < 2} onClick={mergeSelectedContours} />
+                </div>
+                <p className="mt-1 text-xs text-ink/45 dark:text-paper/45">
+                  Клик върху линията на фигура я избира цялата, Shift+клик добавя втора. Допрени или застъпени фигури стават една обща.
+                </p>
                 <div className="mt-2">
                   <ActionButton icon="trash" label="Изтрий целия контур (дупка/фигура)" danger wide disabled={!selectedCount} onClick={deleteWholeContour} />
                 </div>
@@ -2200,6 +2396,10 @@ export default function EditorPage() {
                 <label className="mt-3 flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={mirrorCopy} onChange={(e) => setMirrorCopy(e.target.checked)} />
                   Създай огледално копие
+                </label>
+                <label className="mt-2 flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={mirrorWeld} disabled={!mirrorCopy} onChange={(e) => setMirrorWeld(e.target.checked)} />
+                  Обедини копието с оригинала в ЕДНА фигура (при разстояние 0)
                 </label>
                 <NumberRow label={`Разстояние (${shapeUnit})`} value={mirrorGap} step={0.5} min={0} onChange={setMirrorGap} />
                 <div className="mt-2 grid grid-cols-3 gap-2">
@@ -2581,7 +2781,7 @@ function ToolOptions({
       {tool === "delete" && <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху точка я изтрива веднага.</p>}
 
       {tool === "scissors" && (
-        <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай линия с Полилиния ПРЕЗ контура (или с краища върху него). 2) Кликни с Ножицата върху страната, която искаш да махнеш — всичко от линията натам се изрязва и линията става новият ръб. Клик върху линия без връзки я изтрива цялата (дупка/фигура/полилиния).</p>
+        <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай линия с Полилиния ПРЕЗ контура (или с краища върху него). 2) Кликни с Ножицата върху страната, която искаш да махнеш — всичко от линията натам се изрязва и линията става новият ръб. Клик върху ОБЩИЯ ръб на две допрени фигури го изрязва и ги обединява в една. Клик върху линия без връзки я изтрива цялата (дупка/фигура/полилиния).</p>
       )}
 
       {tool === "image" && (
@@ -2642,6 +2842,9 @@ function ToolOptions({
       {tool === "polyline" && (
         <div className="space-y-2">
           <p className="text-sm text-ink/65 dark:text-paper/65">Поставени точки: {polyCount}</p>
+          <p className="text-xs text-ink/50 dark:text-paper/50">
+            Клик върху вече поставена точка я хваща — влачи я, за да я преместиш още докато чертаеш. Delete/Backspace маха последната точка. Двоен клик или десен бутон завършва линията.
+          </p>
           {selectedLine !== null && (
             <p className="rounded-lg border border-paper-3 p-2 text-xs text-ink/65 dark:border-ink-3 dark:text-paper/65">
               Избрана полилиния #{selectedLine + 1}
@@ -2820,6 +3023,7 @@ type IconName =
   | "arrowLeft"
   | "arrowRight"
   | "align"
+  | "weld"
   | "scale"
   | "offset"
   | "fullscreen"
@@ -2909,6 +3113,12 @@ function Icon({ name }: { name: IconName }) {
         <>
           <path {...common} d="M3 12h18" strokeDasharray="3 3" />
           <path {...common} d="M8 8l4-4 4 4M8 16l4 4 4-4" />
+        </>
+      )}
+      {name === "weld" && (
+        <>
+          <path {...common} d="M14.8 7.2a5.5 5.5 0 1 0 0 9.6" />
+          <path {...common} d="M9.2 7.2a5.5 5.5 0 1 1 0 9.6" />
         </>
       )}
       {name === "arrowUp" && <path {...common} d="M12 20V4M6 10l6-6 6 6" />}
