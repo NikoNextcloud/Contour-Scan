@@ -9,7 +9,10 @@ import {
   chaikin,
   chamferCorner,
   despike,
+  dogboneCorner,
   filletCorner,
+  plasmaCorner,
+  tboneCorner,
   measure,
   minAreaRect,
   nearestSegment,
@@ -40,6 +43,7 @@ type ToolMode =
   | "rotate"
   | "delete"
   | "scissors"
+  | "fillet"
   | "circle"
   | "triangle"
   | "square"
@@ -217,6 +221,9 @@ export default function EditorPage() {
   const [mirrorWeld, setMirrorWeld] = useState(false);
   // Магнит: при влачене на фигура/точка тя прилепва точка-към-точка към другите.
   const [snapObjects, setSnapObjects] = useState(true);
+  // Инструмент „Заобляне на ъгли“: тип и радиус (мм при калибрация, иначе px).
+  const [filletType, setFilletType] = useState<"normal" | "dogbone" | "tbone" | "plasma">("normal");
+  const [filletRadius, setFilletRadius] = useState(10);
   const [smoothStrength, setSmoothStrength] = useState(settings.smoothing);
   const [simplifyEps, setSimplifyEps] = useState(2);
 
@@ -1287,6 +1294,47 @@ export default function EditorPage() {
     setTool(next);
   };
 
+  /**
+   * Инструмент „Заобляне на ъгли“ (по модела на VCarve Create Fillets):
+   * клик върху ъглова точка я превръща в дъга/прорез според избрания тип.
+   * При T-Bone прорезът ляга на страната, откъм която е кликнато.
+   */
+  const applyFilletAt = (p: Pt) => {
+    const hit = hitPoint(p);
+    if (!hit) return toast("Кликни върху ъглова точка на фигура", "err");
+    const r = distanceToPx(filletRadius);
+    if (r <= 0) return toast("Задай радиус по-голям от 0", "err");
+    const poly = polys[hit.ci];
+    let next: Pt[];
+    if (filletType === "normal") {
+      next = filletCorner(poly, hit.pi, r);
+    } else if (filletType === "dogbone") {
+      next = dogboneCorner(poly, hit.pi, r);
+    } else if (filletType === "plasma") {
+      next = plasmaCorner(poly, hit.pi, r);
+    } else {
+      const n = poly.length;
+      const A = poly[(hit.pi - 1 + n) % n];
+      const B = poly[hit.pi];
+      const C = poly[(hit.pi + 1) % n];
+      const side = pointToSegment(p, B, A) <= pointToSegment(p, B, C) ? "prev" : "next";
+      next = tboneCorner(poly, hit.pi, r, side);
+    }
+    if (next === poly)
+      return toast("Ъгълът не може да се обработи (прав участък или твърде къса страна)", "err");
+    pushUndo();
+    setPolys(polys.map((q, ci) => (ci === hit.ci ? next : q)));
+    setSelectedPoints(new Set());
+    setBezierNode(null);
+    const labels = {
+      normal: `Ъгълът е заоблен с R ${filletRadius} ${shapeUnitLabel()}`,
+      dogbone: "Добавен е Dog-Bone прорез",
+      tbone: "Добавен е T-Bone прорез",
+      plasma: "Добавено е външно заобляне (плазма/нож)",
+    } as const;
+    toast(labels[filletType]);
+  };
+
   /** Снимка на всички фигури в началото на влачене (за стабилно местене без дрейф). */
   const basePolys = () => polys.map((poly) => poly.map((q) => ({ ...q })));
 
@@ -1346,6 +1394,10 @@ export default function EditorPage() {
     }
     if (tool === "scissors") {
       deleteNearestLine(p);
+      return;
+    }
+    if (tool === "fillet") {
+      applyFilletAt(p);
       return;
     }
     if (tool === "move") {
@@ -2281,6 +2333,7 @@ export default function EditorPage() {
             <IconTool active={tool === "rotate"} icon="rotate" label="Завърти" onClick={() => switchTool("rotate")} />
             <IconTool active={tool === "delete"} icon="trash" label="Изтриване на точки" onClick={() => switchTool("delete")} />
             <IconTool active={tool === "scissors"} icon="scissors" label="Ножица — клик върху линия я изтрива" onClick={() => switchTool("scissors")} />
+            <IconTool active={tool === "fillet"} icon="fillet" label="Заобляне на ъгли — клик върху ъгъл (Normal / Dog-Bone / T-Bone / Плазма)" onClick={() => switchTool("fillet")} />
           </ToolGroup>
           <ToolGroup label="Фигури">
             <IconTool active={tool === "circle"} icon="circle" label="Кръг" onClick={() => switchTool("circle")} />
@@ -2354,6 +2407,10 @@ export default function EditorPage() {
                 tool={tool}
                 diameter={shapeDiameter}
                 unit={shapeUnit}
+                filletType={filletType}
+                filletRadius={filletRadius}
+                onFilletType={setFilletType}
+                onFilletRadius={setFilletRadius}
                 selectedCount={selectedCount}
                 selectedLine={selectedLine}
                 selectedLinePoint={selectedLinePoint}
@@ -2694,6 +2751,10 @@ function ToolOptions({
   tool,
   diameter,
   unit,
+  filletType,
+  filletRadius,
+  onFilletType,
+  onFilletRadius,
   selectedCount,
   selectedLine,
   selectedLinePoint,
@@ -2725,6 +2786,10 @@ function ToolOptions({
   tool: ToolMode;
   diameter: number;
   unit: string;
+  filletType: "normal" | "dogbone" | "tbone" | "plasma";
+  filletRadius: number;
+  onFilletType: (t: "normal" | "dogbone" | "tbone" | "plasma") => void;
+  onFilletRadius: (r: number) => void;
   selectedCount: number;
   selectedLine: number | null;
   selectedLinePoint: { li: number; pi: number } | null;
@@ -2874,6 +2939,56 @@ function ToolOptions({
       )}
 
       {tool === "delete" && <p className="text-sm text-ink/65 dark:text-paper/65">Клик върху точка я изтрива веднага.</p>}
+
+      {tool === "fillet" && (
+        <div className="space-y-3">
+          <label className="block text-xs text-ink/60 dark:text-paper/60">
+            Радиус на заобляне / инструмента ({unit})
+            <input
+              className="field readout mt-1"
+              type="number"
+              step={0.5}
+              min={0.1}
+              value={filletRadius}
+              onChange={(e) => onFilletRadius(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+            />
+          </label>
+          <p className="text-sm text-ink/65 dark:text-paper/65">
+            Кликни върху ъглова точка, за да я превърнеш в заобляне/прорез.
+          </p>
+          <div className="space-y-2 text-sm">
+            <label className="flex items-start gap-2">
+              <input type="radio" className="mt-1" checked={filletType === "normal"} onChange={() => onFilletType("normal")} />
+              <span>
+                <strong>Нормално заобляне</strong>
+                <span className="block text-xs text-ink/50 dark:text-paper/50">Ъгълът става кръгла дъга с избрания радиус.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input type="radio" className="mt-1" checked={filletType === "dogbone"} onChange={() => onFilletType("dogbone")} />
+              <span>
+                <strong>„Dog-Bone“ прорез</strong>
+                <span className="block text-xs text-ink/50 dark:text-paper/50">Кръгъл джоб по бисектрисата на вътрешния ъгъл — прави луфт, за да пасват сглобки и шлицове.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input type="radio" className="mt-1" checked={filletType === "tbone"} onChange={() => onFilletType("tbone")} />
+              <span>
+                <strong>„T-Bone“ прорез</strong>
+                <span className="block text-xs text-ink/50 dark:text-paper/50">Луфт във вътрешен ъгъл, когато слотът е широк колкото инструмента. Прорезът ляга на страната, откъм която кликнеш.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input type="radio" className="mt-1" checked={filletType === "plasma"} onChange={() => onFilletType("plasma")} />
+              <span>
+                <strong>Плазма / влачещ нож</strong>
+                <span className="block text-xs text-ink/50 dark:text-paper/50">Външно заобляне — реже се ПОКРАЙ ъгъла с примка отвън, за плазма или влачещ нож.</span>
+              </span>
+            </label>
+          </div>
+          <p className="text-xs text-ink/50 dark:text-paper/50">Премахване: Ctrl+Z връща последното заобляне.</p>
+        </div>
+      )}
 
       {tool === "scissors" && (
         <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай линия с Полилиния ПРЕЗ контура (или с краища върху него). 2) Кликни с Ножицата върху страната, която искаш да махнеш — всичко от линията натам се изрязва и линията става новият ръб. Клик върху ОБЩИЯ ръб на две допрени фигури го изрязва и ги обединява в една. Клик върху линия без връзки я изтрива цялата (дупка/фигура/полилиния).</p>

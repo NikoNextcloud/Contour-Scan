@@ -530,3 +530,109 @@ export function pointInPolygon(p: Pt, pts: Pt[]): boolean {
   }
   return inside;
 }
+
+/* --------------------- CNC ъглови прорези (fillet типове) --------------------- */
+
+/** Дъга около център O от точка from до to, минаваща откъм страната на via. */
+function arcVia(O: Pt, r: number, from: Pt, to: Pt, via: Pt, steps = 20): Pt[] {
+  const TAU = Math.PI * 2;
+  const norm = (x: number) => ((x % TAU) + TAU) % TAU;
+  const a1 = Math.atan2(from.y - O.y, from.x - O.x);
+  const a2 = Math.atan2(to.y - O.y, to.x - O.x);
+  const av = Math.atan2(via.y - O.y, via.x - O.x);
+  const fwd = norm(a2 - a1) || TAU;
+  const sweep = norm(av - a1) <= fwd ? fwd : fwd - TAU;
+  return Array.from({ length: steps + 1 }, (_, s) => {
+    const a = a1 + (sweep * s) / steps;
+    return { x: O.x + Math.cos(a) * r, y: O.y + Math.sin(a) * r };
+  });
+}
+
+/** Локална геометрия на ъгъл i: съседи, единични посоки, ъгъл и бисектриса. */
+function cornerFrame(pts: Pt[], i: number) {
+  const n = pts.length;
+  if (n < 3) return null;
+  const A = pts[(i - 1 + n) % n];
+  const B = pts[i];
+  const C = pts[(i + 1) % n];
+  const l1 = Math.hypot(A.x - B.x, A.y - B.y);
+  const l2 = Math.hypot(C.x - B.x, C.y - B.y);
+  if (l1 < 1e-6 || l2 < 1e-6) return null;
+  const u1 = { x: (A.x - B.x) / l1, y: (A.y - B.y) / l1 };
+  const u2 = { x: (C.x - B.x) / l2, y: (C.y - B.y) / l2 };
+  const dot = Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y));
+  const theta = Math.acos(dot);
+  const bl = Math.hypot(u1.x + u2.x, u1.y + u2.y);
+  if (theta < 0.05 || theta > Math.PI - 0.05 || bl < 1e-6) return null;
+  const bis = { x: (u1.x + u2.x) / bl, y: (u1.y + u2.y) / bl };
+  return { A, B, C, u1, u2, l1, l2, theta, bis };
+}
+
+/**
+ * Dog-Bone прорез: кръгъл джоб с радиуса на инструмента, вкопан по
+ * бисектрисата НАВЪН от клина на ъгъла (в материала), така че фрезата
+ * да изчисти вътрешния ъгъл и сглобките да пасват.
+ */
+export function dogboneCorner(pts: Pt[], i: number, r: number): Pt[] {
+  const f = cornerFrame(pts, i);
+  if (!f || r <= 0) return pts;
+  const { B, bis } = f;
+  const O = { x: B.x - bis.x * r, y: B.y - bis.y * r };
+  const deep = { x: B.x - bis.x * 2 * r, y: B.y - bis.y * 2 * r };
+  const loop = arcVia(O, r, B, B, deep, 24);
+  const out = [...pts];
+  out.splice(i, 1, ...loop);
+  return out;
+}
+
+/**
+ * T-Bone прорез: полукръгъл джоб, легнал върху избраната страна на ъгъла
+ * (side), с издуване към материала. Ползва се, когато слотът е широк
+ * точно колкото инструмента.
+ */
+export function tboneCorner(pts: Pt[], i: number, r: number, side: "prev" | "next"): Pt[] {
+  const f = cornerFrame(pts, i);
+  if (!f || r <= 0) return pts;
+  const { B, u1, u2, l1, l2, bis } = f;
+  const uE = side === "prev" ? u1 : u2;
+  const lE = side === "prev" ? l1 : l2;
+  const reach = Math.min(2 * r, lE * 0.9);
+  if (reach < 1e-6) return pts;
+  const rr = reach / 2;
+  const O = { x: B.x + uE.x * rr, y: B.y + uE.y * rr };
+  const I = { x: B.x + uE.x * reach, y: B.y + uE.y * reach };
+  // Перпендикуляр към страната, сочещ обратно на клина (към материала).
+  const d = uE.x * bis.x + uE.y * bis.y;
+  let nx = -bis.x + uE.x * d;
+  let ny = -bis.y + uE.y * d;
+  const nl = Math.hypot(nx, ny);
+  if (nl < 1e-6) return pts;
+  nx /= nl;
+  ny /= nl;
+  const via = { x: O.x + nx * rr, y: O.y + ny * rr };
+  const arc = side === "prev" ? arcVia(O, rr, I, B, via, 16) : arcVia(O, rr, B, I, via, 16);
+  const out = [...pts];
+  out.splice(i, 1, ...arc);
+  return out;
+}
+
+/**
+ * Плазма/влачещ нож: външно заобляне — контурът продължава ПОКРАЙ ъгъла и
+ * прави дъга-примка от външната страна, тангентна към двете страни, за да
+ * не се разтапя/дере ъгълът при рязане.
+ */
+export function plasmaCorner(pts: Pt[], i: number, r: number): Pt[] {
+  const f = cornerFrame(pts, i);
+  if (!f || r <= 0) return pts;
+  const { B, u1, u2, theta, bis } = f;
+  const t = r / Math.tan(theta / 2);
+  const d = r / Math.sin(theta / 2);
+  const P1 = { x: B.x - u1.x * t, y: B.y - u1.y * t };
+  const P2 = { x: B.x - u2.x * t, y: B.y - u2.y * t };
+  const O = { x: B.x - bis.x * d, y: B.y - bis.y * d };
+  const far = { x: O.x + ((O.x - B.x) / d) * r, y: O.y + ((O.y - B.y) / d) * r };
+  const arc = arcVia(O, r, P1, P2, far, 24);
+  const out = [...pts];
+  out.splice(i, 1, ...arc);
+  return out;
+}
