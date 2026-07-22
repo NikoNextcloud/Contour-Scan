@@ -358,6 +358,27 @@ export default function EditorPage() {
       ? { x: Math.round(p.x / gridStep) * gridStep, y: Math.round(p.y / gridStep) * gridStep }
       : p;
 
+  /**
+   * Shift-ограничение: векторът се завърта до най-близкия ъгъл, кратен на 45°
+   * (0/45/90/135…), като дължината следва курсора по избраната посока.
+   */
+  const constrainTo45 = (dx: number, dy: number): { x: number; y: number } => {
+    const len = Math.hypot(dx, dy);
+    if (!len) return { x: 0, y: 0 };
+    const step = Math.PI / 4;
+    const ang = Math.round(Math.atan2(dy, dx) / step) * step;
+    const ux = Math.cos(ang);
+    const uy = Math.sin(ang);
+    const t = dx * ux + dy * uy;
+    return { x: ux * t, y: uy * t };
+  };
+
+  /** Точка, ограничена спрямо опорна точка при натиснат Shift. */
+  const constrainFrom = (anchor: Pt, p: Pt): Pt => {
+    const v = constrainTo45(p.x - anchor.x, p.y - anchor.y);
+    return { x: anchor.x + v.x, y: anchor.y + v.y };
+  };
+
   const hitPoint = (p: Pt): { ci: number; pi: number } | null => {
     const tol = 11 / view.scale;
     for (let ci = 0; ci < polys.length; ci++) {
@@ -1354,7 +1375,10 @@ export default function EditorPage() {
         dragRef.current = { kind: "draft-point", pi: di };
         return;
       }
-      setPolyDraft((draft) => [...draft, snapPt(p)]);
+      // Shift: новият сегмент ляга точно на 0°/45°/90° спрямо предишната точка.
+      let q = snapPt(p);
+      if (e.shiftKey && polyDraft.length) q = constrainFrom(polyDraft[polyDraft.length - 1], q);
+      setPolyDraft((draft) => [...draft, q]);
       return;
     }
     if (tool === "arc") {
@@ -1506,7 +1530,13 @@ export default function EditorPage() {
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if ((tool === "polyline" || tool === "arc") && !dragRef.current) setHoverPt(snapPt(toImage(e)));
+    if ((tool === "polyline" || tool === "arc") && !dragRef.current) {
+      let h = snapPt(toImage(e));
+      // Shift: прегледът на следващия сегмент също се ограничава до 45°.
+      if (tool === "polyline" && e.shiftKey && polyDraft.length)
+        h = constrainFrom(polyDraft[polyDraft.length - 1], h);
+      setHoverPt(h);
+    }
     const drag = dragRef.current;
     if (!drag) return;
     if (drag.kind === "pan") {
@@ -1520,7 +1550,12 @@ export default function EditorPage() {
       setContours(translateContourSet(drag.contours, p.x - drag.start.x, p.y - drag.start.y));
     } else if (drag.kind === "line-point") {
       let p = snapPt(toImage(e));
-      if (snapObjects) {
+      const dragLine = openLines[drag.li];
+      if (e.shiftKey && dragLine) {
+        // Shift: точката на линията върви на 0°/45°/90° спрямо съседа си.
+        const ref = dragLine[drag.pi - 1] ?? dragLine[drag.pi + 1];
+        if (ref) p = constrainFrom(ref, p);
+      } else if (snapObjects) {
         // Магнит: точката на линията прилепва към точки на фигурите и на другите линии.
         const statics: Pt[] = polys.flat();
         openLines.forEach((line, li) => {
@@ -1588,7 +1623,10 @@ export default function EditorPage() {
     } else if (drag.kind === "draft-point") {
       // Местене на точка от чертаната (незавършена) полилиния.
       let q = snapPt(toImage(e));
-      if (snapObjects) {
+      if (e.shiftKey) {
+        const ref = polyDraft[drag.pi - 1] ?? polyDraft[drag.pi + 1];
+        if (ref) q = constrainFrom(ref, q);
+      } else if (snapObjects) {
         const statics: Pt[] = [...polys.flat(), ...openLines.flat()];
         const adj = objectSnapCorrection([q], statics, 10 / view.scale);
         if (adj) q = { x: q.x + adj.dx, y: q.y + adj.dy };
@@ -1598,7 +1636,9 @@ export default function EditorPage() {
       const p = toImage(e);
       setMarquee((m) => (m ? { a: m.a, b: p } : m));
     } else if (drag.kind === "draw-shape") {
-      const p = snapPt(toImage(e));
+      // Shift: разпъването върви точно по 0°/45°/90° (на 45° квадратът е равен).
+      let p = snapPt(toImage(e));
+      if (e.shiftKey) p = constrainFrom(drag.start, p);
       setGhost((g) => (g ? { ...g, cur: p } : g));
     } else if (drag.kind === "image-move") {
       const p = toImage(e);
@@ -1611,10 +1651,13 @@ export default function EditorPage() {
       const tol = 10 / view.scale;
       if (drag.selection.size === 1) {
         // Единична точка: прилепва към мрежата и (с магнита) към чужди точки.
+        // Shift я води точно по 0°/45°/90° спрямо изходното ѝ място.
         const key = [...drag.selection][0];
         const [ci, pi] = key.split(":").map(Number);
         let target = snapPt(p);
-        if (snapObjects) {
+        if (e.shiftKey) {
+          target = constrainFrom(drag.base[ci][pi], target);
+        } else if (snapObjects) {
           const adj = objectSnapCorrection([target], staticSnapPoints(drag.base, drag.selection), tol);
           if (adj) target = { x: target.x + adj.dx, y: target.y + adj.dy };
         }
@@ -1626,9 +1669,14 @@ export default function EditorPage() {
       } else {
         // Групово местене: делта от началото на влаченето върху базовата
         // снимка + магнитно прилепяне на фигурата към съседните точки.
+        // Shift ограничава движението точно до 0°/45°/90°.
         let dx = p.x - drag.start.x;
         let dy = p.y - drag.start.y;
-        if (snapObjects) {
+        if (e.shiftKey) {
+          const v = constrainTo45(dx, dy);
+          dx = v.x;
+          dy = v.y;
+        } else if (snapObjects) {
           const moving: Pt[] = [];
           drag.base.forEach((poly, ci) =>
             poly.forEach((q, pi) => {
@@ -2289,9 +2337,6 @@ export default function EditorPage() {
               onWheel={onWheel}
             />
           </div>
-          <p className="mt-2 text-xs text-ink/50 dark:text-paper/50">
-            Влачене на празно място: правоъгълник за маркиране (Shift добавя). Клик върху линията на фигура я избира цялата (синьо). Влачене на избрана точка мести цялата селекция. Клик върху точка показва сини дръжки (пен-тул): дръпни дръжка, за да огънеш линията в крива. При изцяло избрана фигура: хвани я откъдето и да е (вкл. отвътре) и я влачи свободно — с включения магнит тя прилепва точка към точка към другите фигури. Две прилепени/застъпени фигури се сливат с бутона „Обедини“ или с Ножица върху общия им ръб. Полилиния: клик върху вече поставена точка я мести; Delete маха последната. Ctrl+клик върху линия: нова точка. Ctrl+Z / Ctrl+Y: назад / напред. Delete: трие избраното (цяла фигура, ако е избрана цялата). Esc: изчиства избора. F: центрира. Скрол: zoom. Среден бутон: местене на изгледа.
-          </p>
         </div>
 
         <div className="max-h-[85vh] overflow-y-auto pr-1">
@@ -2885,7 +2930,7 @@ function ToolOptions({
               <strong className="readout">{radius.toFixed(2)} {unit}</strong>
             </div>
           </div>
-          <p className="text-xs text-ink/50 dark:text-paper/50">Влачене върху чертежа разпъва фигурата свободно (призрачен изглед). Само клик поставя фигура с този диаметър.</p>
+          <p className="text-xs text-ink/50 dark:text-paper/50">Влачене върху чертежа разпъва фигурата свободно (призрачен изглед). Задръж Shift, за да разпъваш точно на 0°/45°/90°. Само клик поставя фигура с този диаметър.</p>
         </div>
       )}
 
@@ -2893,7 +2938,7 @@ function ToolOptions({
         <div className="space-y-2">
           <p className="text-sm text-ink/65 dark:text-paper/65">Поставени точки: {polyCount}</p>
           <p className="text-xs text-ink/50 dark:text-paper/50">
-            Клик върху вече поставена точка я хваща — влачи я, за да я преместиш още докато чертаеш. Delete/Backspace маха последната точка. Двоен клик или десен бутон завършва линията.
+            Клик върху вече поставена точка я хваща — влачи я, за да я преместиш още докато чертаеш. Задръж Shift за точни ъгли 0°/45°/90°. Delete/Backspace маха последната точка. Двоен клик или десен бутон завършва линията.
           </p>
           {selectedLine !== null && (
             <p className="rounded-lg border border-paper-3 p-2 text-xs text-ink/65 dark:border-ink-3 dark:text-paper/65">
