@@ -69,6 +69,36 @@ type DragState =
 const clone = (c: ContourSet): ContourSet => JSON.parse(JSON.stringify(c));
 const pointKey = (ci: number, pi: number) => `${ci}:${pi}`;
 
+/** Брой точки, с които се чертае плътен кръг. */
+const CIRCLE_SEGMENTS = 40;
+
+/** Плътен кръг като полигон, започващ от най-горната точка. */
+const circlePoints = (center: Pt, r: number, segments = CIRCLE_SEGMENTS): Pt[] =>
+  Array.from({ length: segments }, (_, i) => {
+    const a = -Math.PI / 2 + (i / segments) * Math.PI * 2;
+    return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r };
+  });
+
+/**
+ * Разпознава дали контур е (почти) идеален кръг. За кръговете редакторът
+ * показва само 4 контролни точки, а влаченето на точка променя радиуса.
+ */
+const circleInfo = (pts: Pt[]): { center: Pt; r: number } | null => {
+  if (pts.length < 12) return null;
+  const sum = pts.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+  const center = { x: sum.x / pts.length, y: sum.y / pts.length };
+  const dists = pts.map((p) => Math.hypot(p.x - center.x, p.y - center.y));
+  const r = dists.reduce((a, b) => a + b, 0) / dists.length;
+  if (r < 1e-6) return null;
+  const tol = Math.max(r * 0.02, 0.75);
+  for (const d of dists) if (Math.abs(d - r) > tol) return null;
+  return { center, r };
+};
+
+/** Индексите на четирите контролни точки (горе/дясно/долу/ляво) на кръг. */
+const circleHandleIndices = (count: number): Set<number> =>
+  new Set([0, 1, 2, 3].map((q) => Math.round((q * count) / 4) % count));
+
 const polyLength = (pts: Pt[], closed = false) => {
   let total = 0;
   for (let i = 0; i < pts.length - 1; i++) total += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
@@ -586,10 +616,14 @@ export default function EditorPage() {
       ctx.lineWidth = (wholeSelected ? 3 : 2.2) / view.scale;
       ctx.stroke();
 
+      // Кръговете (без външния контур) показват само 4 контролни точки.
+      const circ = ci !== 0 ? circleInfo(pts) : null;
+      const handleIdx = circ ? circleHandleIndices(pts.length) : null;
       const r = 4.5 / view.scale;
       for (let pi = 0; pi < pts.length; pi++) {
         const p = pts[pi];
         const selected = selectedPoints.has(pointKey(ci, pi));
+        if (handleIdx && !handleIdx.has(pi) && !selected) continue;
         ctx.beginPath();
         ctx.arc(p.x, p.y, selected ? r * 1.75 : r, 0, Math.PI * 2);
         ctx.fillStyle = selected ? "#e8a33d" : "#ffffff";
@@ -598,14 +632,16 @@ export default function EditorPage() {
         ctx.fill();
         ctx.stroke();
       }
-      for (let pi = 0; pi < pts.length; pi++) {
-        const a = pts[pi];
-        const b = pts[(pi + 1) % pts.length];
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        ctx.beginPath();
-        ctx.arc(mid.x, mid.y, 2.2 / view.scale, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(17,24,39,0.28)";
-        ctx.fill();
+      if (!handleIdx) {
+        for (let pi = 0; pi < pts.length; pi++) {
+          const a = pts[pi];
+          const b = pts[(pi + 1) % pts.length];
+          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          ctx.beginPath();
+          ctx.arc(mid.x, mid.y, 2.2 / view.scale, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(17,24,39,0.28)";
+          ctx.fill();
+        }
       }
     });
 
@@ -1058,6 +1094,114 @@ export default function EditorPage() {
     return true;
   };
 
+  /**
+   * Trim за отворени линии: кликнатият участък от полилинията се изрязва
+   * до най-близките ПРЕСИЧАНИЯ (с фигури, с други линии или със самата нея).
+   * Остатъците остават като отделни линии. Връща false, ако няма пресичания.
+   */
+  const trimOpenLineAt = (li: number, p: Pt): boolean => {
+    const line = openLines[li];
+    if (!line || line.length < 2) return false;
+
+    const segInt = (p1: Pt, p2: Pt, p3: Pt, p4: Pt): number | null => {
+      const d1x = p2.x - p1.x;
+      const d1y = p2.y - p1.y;
+      const d2x = p4.x - p3.x;
+      const d2y = p4.y - p3.y;
+      const den = d1x * d2y - d1y * d2x;
+      if (Math.abs(den) < 1e-12) return null;
+      const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / den;
+      const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / den;
+      if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+      return t;
+    };
+
+    // Позиция на клика по линията (дробен индекс на сегмент).
+    let clickPos = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < line.length - 1; i++) {
+      const A = line[i];
+      const B = line[i + 1];
+      const dx = B.x - A.x;
+      const dy = B.y - A.y;
+      const len2 = dx * dx + dy * dy || 1;
+      let t = ((p.x - A.x) * dx + (p.y - A.y) * dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(p.x - (A.x + t * dx), p.y - (A.y + t * dy));
+      if (d < bestDist) {
+        bestDist = d;
+        clickPos = i + t;
+      }
+    }
+    if (clickPos < 0) return false;
+
+    // Всички пресичания по дължината на линията.
+    const cuts: number[] = [];
+    for (let i = 0; i < line.length - 1; i++) {
+      const A = line[i];
+      const B = line[i + 1];
+      for (const poly of polys) {
+        const n = poly.length;
+        for (let j = 0; j < n; j++) {
+          const t = segInt(A, B, poly[j], poly[(j + 1) % n]);
+          if (t !== null) cuts.push(i + t);
+        }
+      }
+      openLines.forEach((other, oi) => {
+        if (oi === li) return;
+        for (let j = 0; j < other.length - 1; j++) {
+          const t = segInt(A, B, other[j], other[j + 1]);
+          if (t !== null) cuts.push(i + t);
+        }
+      });
+      for (let j = 0; j < line.length - 1; j++) {
+        if (Math.abs(i - j) <= 1) continue;
+        const t = segInt(A, B, line[j], line[j + 1]);
+        if (t !== null) cuts.push(i + t);
+      }
+    }
+    if (!cuts.length) return false;
+
+    const EPS = 1e-4;
+    const before = cuts.filter((c) => c < clickPos - EPS);
+    const after = cuts.filter((c) => c > clickPos + EPS);
+    const lo = before.length ? Math.max(...before) : 0;
+    const hi = after.length ? Math.min(...after) : line.length - 1;
+
+    const ptAt = (pos: number): Pt => {
+      const i = Math.max(0, Math.min(Math.floor(pos), line.length - 2));
+      const t = pos - i;
+      const A = line[i];
+      const B = line[i + 1];
+      return { x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t };
+    };
+    const dedupe = (pts: Pt[]): Pt[] =>
+      pts.filter((q, i) => i === 0 || Math.hypot(q.x - pts[i - 1].x, q.y - pts[i - 1].y) > 1e-6);
+
+    const pieces: Pt[][] = [];
+    if (lo > EPS) {
+      const a = dedupe([...line.slice(0, Math.floor(lo) + 1), ptAt(lo)]);
+      if (a.length >= 2) pieces.push(a);
+    }
+    if (hi < line.length - 1 - EPS) {
+      const b = dedupe([ptAt(hi), ...line.slice(Math.floor(hi) + 1)]);
+      if (b.length >= 2) pieces.push(b);
+    }
+
+    pushUndo();
+    setContours(
+      (cur) =>
+        cur && {
+          ...cur,
+          polylines: (cur.polylines ?? []).flatMap((l, i2) => (i2 === li ? pieces : [l])),
+        }
+    );
+    setSelectedLine(null);
+    setSelectedLinePoint(null);
+    toast(pieces.length ? "Участъкът е изрязан до пресичанията" : "Линията е изтрита");
+    return true;
+  };
+
   /** Ножица: клик върху линия я изтрива директно (без зелени отворени фигури). */
   const deleteNearestLine = (p: Pt) => {
     const tol = 18 / view.scale;
@@ -1081,6 +1225,8 @@ export default function EditorPage() {
     if (best.idx === -1 || best.dist > tol) return;
 
     if (best.type === "line") {
+      // Пресечена линия: реже се само участъкът до пресичанията (Trim).
+      if (trimOpenLineAt(best.idx, p)) return;
       pushUndo();
       setContours(
         (cur) =>
@@ -1147,10 +1293,7 @@ export default function EditorPage() {
     const r = d / 2;
     let pts: Pt[];
     if (shape === "circle") {
-      pts = Array.from({ length: 4 }, (_, i) => {
-        const a = -Math.PI / 2 + (i / 4) * Math.PI * 2;
-        return { x: center.x + Math.cos(a) * r, y: center.y + Math.sin(a) * r };
-      });
+      pts = circlePoints(center, r);
     } else if (shape === "triangle") {
       pts = Array.from({ length: 3 }, (_, i) => {
         const a = -Math.PI / 2 + (i / 3) * Math.PI * 2;
@@ -1172,10 +1315,7 @@ export default function EditorPage() {
   const shapeFromDrag = (shape: "circle" | "triangle" | "square", a: Pt, b: Pt): Pt[] => {
     if (shape === "circle") {
       const r = Math.hypot(b.x - a.x, b.y - a.y);
-      return Array.from({ length: 4 }, (_, i) => {
-        const ang = -Math.PI / 2 + (i / 4) * Math.PI * 2;
-        return { x: a.x + Math.cos(ang) * r, y: a.y + Math.sin(ang) * r };
-      });
+      return circlePoints(a, r);
     }
     const minX = Math.min(a.x, b.x);
     const maxX = Math.max(a.x, b.x);
@@ -1706,6 +1846,25 @@ export default function EditorPage() {
         // Shift я води точно по 0°/45°/90° спрямо изходното ѝ място.
         const key = [...drag.selection][0];
         const [ci, pi] = key.split(":").map(Number);
+        // Кръг: влаченето на контролна точка променя радиуса на целия кръг.
+        const circ = ci !== 0 ? circleInfo(drag.base[ci]) : null;
+        if (circ) {
+          const nr = Math.max(0.5, Math.hypot(p.x - circ.center.x, p.y - circ.center.y));
+          setPolys(
+            drag.base.map((poly, i) =>
+              i === ci
+                ? poly.map((q) => {
+                    const d = Math.hypot(q.x - circ.center.x, q.y - circ.center.y) || 1;
+                    return {
+                      x: circ.center.x + ((q.x - circ.center.x) / d) * nr,
+                      y: circ.center.y + ((q.y - circ.center.y) / d) * nr,
+                    };
+                  })
+                : poly
+            )
+          );
+          return;
+        }
         let target = snapPt(p);
         if (e.shiftKey) {
           target = constrainFrom(drag.base[ci][pi], target);
@@ -3033,7 +3192,7 @@ function ToolOptions({
       )}
 
       {tool === "scissors" && (
-        <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай линия с Полилиния ПРЕЗ контура (или с краища върху него). 2) Кликни с Ножицата върху страната, която искаш да махнеш — всичко от линията натам се изрязва и линията става новият ръб. Клик върху ОБЩИЯ ръб на две допрени фигури го изрязва и ги обединява в една. Клик върху линия без връзки я изтрива цялата (дупка/фигура/полилиния).</p>
+        <p className="text-sm text-ink/65 dark:text-paper/65">1) Начертай линия с Полилиния ПРЕЗ контура (или с краища върху него). 2) Кликни с Ножицата върху страната, която искаш да махнеш — всичко от линията натам се изрязва и линията става новият ръб. Клик върху ОБЩИЯ ръб на две допрени фигури го изрязва и ги обединява в една. Клик върху ПРЕСЕЧЕНА линия изрязва само участъка до пресичанията (Trim). Линия без пресичания се изтрива цялата.</p>
       )}
 
       {tool === "image" && (
@@ -3088,6 +3247,9 @@ function ToolOptions({
             </div>
           </div>
           <p className="text-xs text-ink/50 dark:text-paper/50">Влачене върху чертежа разпъва фигурата свободно (призрачен изглед). Задръж Shift, за да разпъваш точно на 0°/45°/90°. Само клик поставя фигура с този диаметър.</p>
+          {tool === "circle" && (
+            <p className="text-xs text-ink/50 dark:text-paper/50">Кръгът е истински кръг с 4 контролни точки — хвани която и да е от тях, за да промениш радиуса.</p>
+          )}
         </div>
       )}
 
